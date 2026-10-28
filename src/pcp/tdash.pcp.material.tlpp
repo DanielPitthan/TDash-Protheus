@@ -1,0 +1,72 @@
+#include 'tlpp-core.th'
+#include 'totvs.ch'
+
+namespace tdash.pcp
+
+/*/{Protheus.doc} u_materialTotals
+Balanço de matéria-prima das OPs encerradas: empenhado (SD4), consumido (requisições menos devoluções da SD3) e
+produzido (apontamentos de produção da SD3).
+Perda de material = consumido - produzido. Devolvido (não absorvido) = empenhado - consumido.
+Só entram as OPs com empenho ou consumo comparável (componentes na mesma unidade do produto); as demais são contadas
+em "skipped". Componentes com unidade diferente da do produto já vêm fora das somas e são contados em "otherUnit".
+@type user function
+@author TDash
+@since 22/10/2026
+@param aOrders, array, OPs { op, product, label, closedAt, produced, reserved, consumed, otherUnit } (json)
+@return json, { produced, reserved, consumed, loss, returned, orders, skipped, otherUnit }
+/*/
+User Function materialTotals(aOrders as array) as json
+    local jTotals := jsonObject():new() as json
+    local nX      := 0 as numeric
+
+    jTotals["produced"]  := 0
+    jTotals["reserved"]  := 0
+    jTotals["consumed"]  := 0
+    jTotals["orders"]    := 0
+    jTotals["skipped"]   := 0
+    jTotals["otherUnit"] := 0
+
+    for nX := 1 to Len(aOrders)
+        jTotals["otherUnit"] += aOrders[nX]["otherUnit"]
+        if u_materialCounts(aOrders[nX])
+            jTotals["produced"] += aOrders[nX]["produced"]
+            jTotals["reserved"] += aOrders[nX]["reserved"]
+            jTotals["consumed"] += aOrders[nX]["consumed"]
+            jTotals["orders"]   += 1
+        else
+            jTotals["skipped"] += 1
+        endIf
+    next nX
+
+    jTotals["loss"]     := jTotals["consumed"] - jTotals["produced"]
+    jTotals["returned"] := jTotals["reserved"] - jTotals["consumed"]
+return jTotals
+
+/*/{Protheus.doc} u_materialCounts
+Diz se a OP entra no balanço de matéria-prima: precisa ter empenho ou consumo na mesma unidade do produto.
+Sem isso, a produção dela apareceria inteira como "ganho" e distorceria a perda.
+@type user function
+@author TDash
+@since 22/10/2026
+@param jOrder, json, OP { reserved, consumed }
+@return logical, .T. quando entra
+/*/
+User Function materialCounts(jOrder as json) as logical
+return jOrder["reserved"] > 0 .or. jOrder["consumed"] > 0
+
+/*/{Protheus.doc} u_lossRate
+Perda de material em percentual do consumido.
+@type user function
+@author TDash
+@since 22/10/2026
+@param nLoss, numeric, consumido - produzido
+@param nConsumed, numeric, consumido
+@return numeric, percentual com 2 casas (0 sem consumo)
+/*/
+User Function lossRate(nLoss as numeric, nConsumed as numeric) as numeric
+    local nRate := 0 as numeric
+
+    if nConsumed > 0
+        nRate := Round((nLoss / nConsumed) * 100, 2)
+    endIf
+return nRate

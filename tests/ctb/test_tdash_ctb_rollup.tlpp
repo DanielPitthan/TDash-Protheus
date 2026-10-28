@@ -1,0 +1,127 @@
+#include "tlpp-core.th"
+#include "tlpp-probat.th"
+
+namespace tests.ctb
+
+/*/{Protheus.doc} test_tdash_ctb_rollup
+Testes PROBAT da totalização das linhas da Visão Gerencial (sem banco).
+Execução: appserver.exe -console -consolelog -run=tlpp.probat.run -env={AMBIENTE}
+@type class
+@author TDash
+@since 21/10/2026
+/*/
+@TestFixture()
+Class test_tdash_ctb_rollup
+    Public Method New() as Object
+
+    @Test('rollup: DRE encadeada, bruta menos deduções menos custos')
+    Public Method rollup_IncomeStatementChain_SubtractsOppositeNature() as Logical
+
+    @Test('rollup: retificadora (natureza oposta) subtrai do grupo do ativo')
+    Public Method rollup_ContraAccount_SubtractsFromGroup() as Logical
+
+    @Test('rollup: nível de cada linha pela cadeia de superiores')
+    Public Method rollup_Hierarchy_ReturnsLevels() as Logical
+
+    @Test('rollup: hierarquia em ciclo termina sem travar')
+    Public Method rollup_CyclicHierarchy_Terminates() as Logical
+
+    @Test('rollup: lista vazia devolve vazio')
+    Public Method rollup_Empty_ReturnsEmpty() as Logical
+
+    @Test('rollup: superior inexistente vira nível zero e a analítica mantém o valor')
+    Public Method rollup_OrphanParent_KeepsOwnValue() as Logical
+EndClass
+
+Method New() as Object Class test_tdash_ctb_rollup
+Return Self
+
+Static Function line(cKey as Character, cParent as Character, cClass as Character, cNormal as Character, nOwn as Numeric) as Array
+Return { cKey, cParent, cClass, cNormal, nOwn }
+
+Static Function valueOf(aResult as Array, cKey as Character) as Numeric
+    Local nPos := AScan(aResult, {|x| x[1] == cKey}) as Numeric
+    Local nValue := 0 as Numeric
+
+    If nPos > 0
+        nValue := aResult[nPos][2]
+    EndIf
+Return nValue
+
+Static Function levelOf(aResult as Array, cKey as Character) as Numeric
+    Local nPos := AScan(aResult, {|x| x[1] == cKey}) as Numeric
+    Local nLevel := -1 as Numeric
+
+    If nPos > 0
+        nLevel := aResult[nPos][3]
+    EndIf
+Return nLevel
+
+Method rollup_IncomeStatementChain_SubtractsOppositeNature() as Logical Class test_tdash_ctb_rollup
+    // 03 = 01 - 02; 05 = 03 - 04; 99 = 05 (natureza "2" = credora; "1" = devedora)
+    Local aResult := tdash.ctb.u_rollup({;
+        line("0101", "01", "2", "2", 1000),;
+        line("0102", "01", "2", "2", 500),;
+        line("01",   "03", "1", "2", 0),;
+        line("0201", "02", "2", "1", 200),;
+        line("02",   "03", "1", "1", 0),;
+        line("03",   "05", "1", "2", 0),;
+        line("0401", "04", "2", "1", 600),;
+        line("04",   "05", "1", "1", 0),;
+        line("05",   "99", "1", "2", 0),;
+        line("99",   "",   "1", "2", 0) }) as Array
+
+    tlpp.probat.assertEquals(valueOf(aResult, "01"), 1500)
+    tlpp.probat.assertEquals(valueOf(aResult, "02"), 200)
+    tlpp.probat.assertEquals(valueOf(aResult, "03"), 1300)
+    tlpp.probat.assertEquals(valueOf(aResult, "04"), 600)
+    tlpp.probat.assertEquals(valueOf(aResult, "05"), 700)
+    tlpp.probat.assertEquals(valueOf(aResult, "99"), 700)
+Return .T.
+
+Method rollup_ContraAccount_SubtractsFromGroup() as Logical Class test_tdash_ctb_rollup
+    // Ativo (devedora): circulante 500; não circulante = imobilizado 1000 menos depreciação acumulada 300 (credora)
+    Local aResult := tdash.ctb.u_rollup({;
+        line("1",    "",   "1", "1", 0),;
+        line("11",   "1",  "1", "1", 0),;
+        line("1101", "11", "2", "1", 500),;
+        line("12",   "1",  "1", "1", 0),;
+        line("1201", "12", "2", "1", 1000),;
+        line("1202", "12", "2", "2", 300) }) as Array
+
+    tlpp.probat.assertEquals(valueOf(aResult, "11"), 500)
+    tlpp.probat.assertEquals(valueOf(aResult, "12"), 700)
+    tlpp.probat.assertEquals(valueOf(aResult, "1"), 1200)
+Return .T.
+
+Method rollup_Hierarchy_ReturnsLevels() as Logical Class test_tdash_ctb_rollup
+    Local aResult := tdash.ctb.u_rollup({;
+        line("1",    "",   "1", "1", 0),;
+        line("11",   "1",  "1", "1", 0),;
+        line("1101", "11", "2", "1", 10) }) as Array
+
+    tlpp.probat.assertEquals(levelOf(aResult, "1"), 0)
+    tlpp.probat.assertEquals(levelOf(aResult, "11"), 1)
+    tlpp.probat.assertEquals(levelOf(aResult, "1101"), 2)
+Return .T.
+
+Method rollup_CyclicHierarchy_Terminates() as Logical Class test_tdash_ctb_rollup
+    // A é superior de B e B é superior de A: não pode travar
+    Local aResult := tdash.ctb.u_rollup({;
+        line("A", "B", "1", "1", 0),;
+        line("B", "A", "1", "1", 0) }) as Array
+
+    tlpp.probat.assertEquals(Len(aResult), 2)
+    tlpp.probat.assertEquals(valueOf(aResult, "A"), 0)
+Return .T.
+
+Method rollup_Empty_ReturnsEmpty() as Logical Class test_tdash_ctb_rollup
+    tlpp.probat.assertEquals(Len(tdash.ctb.u_rollup({})), 0)
+Return .T.
+
+Method rollup_OrphanParent_KeepsOwnValue() as Logical Class test_tdash_ctb_rollup
+    Local aResult := tdash.ctb.u_rollup({ line("X1", "NAOEXISTE", "2", "1", 42) }) as Array
+
+    tlpp.probat.assertEquals(valueOf(aResult, "X1"), 42)
+    tlpp.probat.assertEquals(levelOf(aResult, "X1"), 0)
+Return .T.

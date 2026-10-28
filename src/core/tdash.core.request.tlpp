@@ -1,0 +1,64 @@
+#include 'tlpp-core.th'
+#include 'tlpp-rest.th'
+#include 'totvs.ch'
+
+namespace tdash.core
+
+/*/{Protheus.doc} TDashRequest
+Leitura dos parâmetros da requisição REST (query string e path).
+@type class
+@author TDash
+@since 20/10/2026
+@version 1.0
+/*/
+class TDashRequest
+    private data jQuery as json
+    private data jPath  as json
+
+    public method new()
+    public method query(cName as character) as character
+    public method path(cName as character) as character
+endclass
+
+/*/{Protheus.doc} new
+Construtor. Lê query string e path params do oRest.
+@type method
+@author TDash
+@since 20/10/2026
+/*/
+method new() class TDashRequest
+    ::jQuery := oRest:getQueryRequest()
+    ::jPath  := oRest:getPathParamsRequest()
+return self
+
+/*/{Protheus.doc} query
+Valor de um parâmetro da query string.
+@type method
+@author TDash
+@since 20/10/2026
+@param cName, character, nome do parâmetro
+@return character, valor sem espaços nas pontas ou vazio
+/*/
+method query(cName as character) as character class TDashRequest
+    local cValue := "" as character
+
+    if valType(::jQuery) == "J" .and. ::jQuery:hasProperty(cName)
+        cValue := allTrim(cValToChar(::jQuery[cName]))
+    endIf
+return cValue
+
+/*/{Protheus.doc} path
+Valor de um parâmetro do caminho (ex.: :id).
+@type method
+@author TDash
+@since 20/10/2026
+@param cName, character, nome do parâmetro
+@return character, valor sem espaços nas pontas ou vazio
+/*/
+method path(cName as character) as character class TDashRequest
+    local cValue := "" as character
+
+    if valType(::jPath) == "J" .and. ::jPath:hasProperty(cName)
+        cValue := allTrim(cValToChar(::jPath[cName]))
+    endIf
+return cValue

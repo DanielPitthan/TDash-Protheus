@@ -1,0 +1,223 @@
+#include "tlpp-core.th"
+
+namespace tdash.core
+
+// Caracteres aceitos em códigos recebidos na query string (bind no SQL)
+#define SAFE_CHARS "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.- "
+
+/*/{Protheus.doc} u_parseDate
+Converte AAAAMMDD em data. Rejeita formato inválido e datas inexistentes (ex.: 20260231).
+Não acessa banco, para poder ser testada no PROBAT.
+@type user function
+@author TDash
+@since 20/10/2026
+@param cValue, character, data no formato AAAAMMDD
+@return date, data convertida ou data vazia quando inválida
+/*/
+User Function parseDate(cValue as Character) as Date
+    Local cClean := AllTrim(cValue) as Character
+    Local dValue := CToD("") as Date
+
+    If Len(cClean) == 8 .And. u_isDigits(cClean)
+        dValue := SToD(cClean)
+        // A volta para texto garante que o dia existe no calendário
+        If Empty(dValue) .Or. DToS(dValue) <> cClean
+            dValue := CToD("")
+        EndIf
+    EndIf
+
+Return dValue
+
+/*/{Protheus.doc} u_daysBetween
+Dias de dFrom até dTo, com sinal: positivo quando dTo é depois de dFrom e negativo quando é antes.
+Use no lugar de "data menos data", que o linter do TLPP recusa ("Incompatible types between N and D").
+DateDiffDay devolve a diferença sem sinal; esta função devolve o sinal.
+Data vazia em qualquer lado vale 0.
+@type user function
+@author TDash
+@since 22/10/2026
+@param dFrom, date, data inicial
+@param dTo, date, data final
+@return numeric, dias (com sinal)
+/*/
+User Function daysBetween(dFrom as Date, dTo as Date) as Numeric
+    Local nDays := 0 as Numeric
+
+    If !Empty(dFrom) .And. !Empty(dTo)
+        nDays := DateDiffDay(dFrom, dTo)
+        If dTo < dFrom
+            nDays := 0 - nDays
+        EndIf
+    EndIf
+
+Return nDays
+
+/*/{Protheus.doc} u_isDigits
+Indica se o texto contém apenas dígitos.
+@type user function
+@author TDash
+@since 20/10/2026
+@param cValue, character, texto
+@return logical, .T. quando só há dígitos
+/*/
+User Function isDigits(cValue as Character) as Logical
+    Local lDigits := .T. as Logical
+    Local nX      := 0 as Numeric
+
+    If Empty(cValue)
+        lDigits := .F.
+    Else
+        For nX := 1 To Len(cValue)
+            If !(SubStr(cValue, nX, 1) $ "0123456789")
+                lDigits := .F.
+                Exit
+            EndIf
+        Next nX
+    EndIf
+
+Return lDigits
+
+/*/{Protheus.doc} u_monthsBetween
+Quantidade de meses de calendário cobertos pelo período, incluindo os dois extremos.
+@type user function
+@author TDash
+@since 20/10/2026
+@param dFrom, date, data inicial
+@param dTo, date, data final
+@return numeric, quantidade de meses
+/*/
+User Function monthsBetween(dFrom as Date, dTo as Date) as Numeric
+Return ((Year(dTo) - Year(dFrom)) * 12) + (Month(dTo) - Month(dFrom)) + 1
+
+/*/{Protheus.doc} u_isSafeCode
+Código seguro para bind: letras, dígitos, ponto, hífen e espaço, com tamanho máximo
+do campo no dicionário.
+@type user function
+@author TDash
+@since 20/10/2026
+@param cValue, character, código
+@param nMaxLen, numeric, tamanho máximo (X3_TAMANHO)
+@return logical, .T. quando o código é aceito
+/*/
+User Function isSafeCode(cValue as Character, nMaxLen as Numeric) as Logical
+    Local lSafe := .T. as Logical
+    Local nX    := 0 as Numeric
+
+    If Empty(cValue) .Or. Len(cValue) > nMaxLen
+        lSafe := .F.
+    Else
+        For nX := 1 To Len(cValue)
+            If !(SubStr(cValue, nX, 1) $ SAFE_CHARS)
+                lSafe := .F.
+                Exit
+            EndIf
+        Next nX
+    EndIf
+
+Return lSafe
+
+/*/{Protheus.doc} u_parseCodeList
+Separa uma lista "A,B,C" e valida cada código (tamanho e caracteres).
+@type user function
+@author TDash
+@since 20/10/2026
+@param cCsv, character, lista separada por vírgula
+@param nMaxLen, numeric, tamanho máximo de cada código
+@param nMaxItems, numeric, quantidade máxima de códigos
+@return array, códigos válidos sem repetição; vazio quando algum item é inválido
+/*/
+User Function parseCodeList(cCsv as Character, nMaxLen as Numeric, nMaxItems as Numeric) as Array
+    Local aParts := {} as Array
+    Local aCodes := {} as Array
+    Local nX     := 0 as Numeric
+    Local cCode  := "" as Character
+
+    If !Empty(cCsv)
+        aParts := StrTokArr2(cCsv, ",", .T.)
+        If Len(aParts) <= nMaxItems
+            For nX := 1 To Len(aParts)
+                cCode := AllTrim(aParts[nX])
+                If !u_isSafeCode(cCode, nMaxLen)
+                    aCodes := {}
+                    Exit
+                EndIf
+                If AScan(aCodes, {|x| x == cCode}) == 0
+                    AAdd(aCodes, cCode)
+                EndIf
+            Next nX
+        EndIf
+    EndIf
+
+Return aCodes
+
+/*/{Protheus.doc} u_parseRoleLines
+Interpreta o parâmetro lines ("papel:linha,papel:linha") e preenche jLines com { papel: linha }.
+Só aceita papéis da lista permitida e linhas com o tamanho de CTS_CONTAG.
+@type user function
+@author TDash
+@since 20/10/2026
+@param cValue, character, valor recebido
+@param aRoles, array, papéis permitidos
+@param nMaxLen, numeric, tamanho máximo da linha
+@param jLines, json, objeto que recebe os pares válidos
+@return logical, .T. quando o valor é válido (vazio também é válido)
+/*/
+User Function parseRoleLines(cValue as Character, aRoles as Array, nMaxLen as Numeric, jLines as Json) as Logical
+    Local lValid := .T. as Logical
+    Local aPairs := {} as Array
+    Local aPair  := {} as Array
+    Local nX     := 0 as Numeric
+    Local cRole  := "" as Character
+    Local cLine  := "" as Character
+
+    If !Empty(cValue)
+        aPairs := StrTokArr2(cValue, ",", .T.)
+        If Len(aPairs) > Len(aRoles)
+            lValid := .F.
+        Else
+            For nX := 1 To Len(aPairs)
+                aPair := StrTokArr2(aPairs[nX], ":", .T.)
+                If Len(aPair) <> 2
+                    lValid := .F.
+                    Exit
+                EndIf
+                cRole := AllTrim(aPair[1])
+                cLine := AllTrim(aPair[2])
+                If AScan(aRoles, {|x| x == cRole}) == 0 .Or. !u_isSafeCode(cLine, nMaxLen)
+                    lValid := .F.
+                    Exit
+                EndIf
+                jLines[cRole] := cLine
+            Next nX
+        EndIf
+    EndIf
+
+Return lValid
+
+/*/{Protheus.doc} u_parseInt
+Converte texto em inteiro dentro de um intervalo.
+@type user function
+@author TDash
+@since 20/10/2026
+@param cValue, character, texto recebido
+@param nDefault, numeric, valor quando o texto está vazio
+@param nMin, numeric, mínimo aceito
+@param nMax, numeric, máximo aceito
+@return numeric, valor convertido ou -1 quando inválido
+/*/
+User Function parseInt(cValue as Character, nDefault as Numeric, nMin as Numeric, nMax as Numeric) as Numeric
+    Local cClean := AllTrim(cValue) as Character
+    Local nValue := nDefault as Numeric
+
+    If !Empty(cClean)
+        If !u_isDigits(cClean) .Or. Len(cClean) > 6
+            nValue := -1
+        Else
+            nValue := Val(cClean)
+            If nValue < nMin .Or. nValue > nMax
+                nValue := -1
+            EndIf
+        EndIf
+    EndIf
+
+Return nValue

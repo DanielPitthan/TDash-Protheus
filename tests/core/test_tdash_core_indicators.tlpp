@@ -1,0 +1,104 @@
+#include "tlpp-core.th"
+#include "tlpp-probat.th"
+
+namespace tests.core
+
+/*/{Protheus.doc} test_tdash_core_indicators
+Testes PROBAT das funções comuns de indicadores (sem banco).
+Execução: appserver.exe -console -consolelog -run=tlpp.probat.run -env={AMBIENTE}
+@type class
+@author TDash
+@since 20/10/2026
+/*/
+@TestFixture()
+Class test_tdash_core_indicators
+    Public Method New() as Object
+
+    @Test('findIndicator: id e tipo existentes devolvem a definição')
+    Public Method findIndicator_KnownIdAndKind_ReturnsDefinition() as Logical
+
+    @Test('findIndicator: tipo não suportado ou id desconhecido devolve vazio')
+    Public Method findIndicator_WrongKindOrId_ReturnsEmpty() as Logical
+
+    @Test('topWithOthers: remove zeros, ordena por valor absoluto e agrupa o resto')
+    Public Method topWithOthers_ManyItems_KeepsTopAndGroupsRest() as Logical
+
+    @Test('topWithOthers: até nTop itens não cria agrupamento')
+    Public Method topWithOthers_FewItems_NoOthers() as Logical
+
+    @Test('applyShares: participação pelo valor absoluto')
+    Public Method applyShares_Values_ComputesShare() as Logical
+
+    @Test('kpiItem: comparação calcula a variação percentual')
+    Public Method kpiItem_WithCompare_ComputesDelta() as Logical
+
+    @Test('kpiItem: comparação com zero não calcula variação')
+    Public Method kpiItem_PreviousZero_DeltaIsNull() as Logical
+EndClass
+
+Method New() as Object Class test_tdash_core_indicators
+Return Self
+
+Static Function catalog() as Array
+Return { { "x.a", { "kpi", "list" }, "A", "BRL", "up_is_good", 300 }, { "x.b", { "series" }, "B", "BRL", "neutral", 1800 } }
+
+Static Function items(aValues as Array) as Array
+    Local aItems := {} as Array
+    Local nX     := 0 as Numeric
+
+    For nX := 1 To Len(aValues)
+        aAdd(aItems, tdash.core.u_jsonItem("k" + cValToChar(nX), "Item " + cValToChar(nX), aValues[nX]))
+    Next nX
+Return aItems
+
+Method findIndicator_KnownIdAndKind_ReturnsDefinition() as Logical Class test_tdash_core_indicators
+    Local aDef := tdash.core.u_findIndicator(catalog(), " x.a ", "list") as Array
+
+    tlpp.probat.assertEquals(Len(aDef), 6)
+    tlpp.probat.assertEquals(aDef[1], "x.a")
+Return .T.
+
+Method findIndicator_WrongKindOrId_ReturnsEmpty() as Logical Class test_tdash_core_indicators
+    tlpp.probat.assertEquals(Len(tdash.core.u_findIndicator(catalog(), "x.b", "kpi")), 0)
+    tlpp.probat.assertEquals(Len(tdash.core.u_findIndicator(catalog(), "x.z", "kpi")), 0)
+Return .T.
+
+Method topWithOthers_ManyItems_KeepsTopAndGroupsRest() as Logical Class test_tdash_core_indicators
+    Local aResult := tdash.core.u_topWithOthers(items({ 10, 0, -50, 30, 5, 1 }), 2, "Outros") as Array
+
+    tlpp.probat.assertEquals(Len(aResult), 3)
+    tlpp.probat.assertEquals(aResult[1]["value"], -50)
+    tlpp.probat.assertEquals(aResult[2]["value"], 30)
+    tlpp.probat.assertEquals(aResult[3]["key"], "others")
+    tlpp.probat.assertEquals(aResult[3]["label"], "Outros (3)")
+    tlpp.probat.assertEquals(aResult[3]["value"], 16)
+Return .T.
+
+Method topWithOthers_FewItems_NoOthers() as Logical Class test_tdash_core_indicators
+    Local aResult := tdash.core.u_topWithOthers(items({ 10, 20 }), 5, "Outros") as Array
+
+    tlpp.probat.assertEquals(Len(aResult), 2)
+    tlpp.probat.assertEquals(aResult[1]["value"], 20)
+Return .T.
+
+Method applyShares_Values_ComputesShare() as Logical Class test_tdash_core_indicators
+    Local aResult := tdash.core.u_applyShares(items({ 75, -25 })) as Array
+
+    tlpp.probat.assertEquals(aResult[1]["share"], 0.75)
+    tlpp.probat.assertEquals(aResult[2]["share"], 0.25)
+Return .T.
+
+Method kpiItem_WithCompare_ComputesDelta() as Logical Class test_tdash_core_indicators
+    Local jItem := tdash.core.u_kpiItem(catalog()[1], 120, .T., "prev", 100, "2026-10-20T10:00:00") as Json
+
+    tlpp.probat.assertEquals(jItem["value"], 120)
+    tlpp.probat.assertEquals(jItem["compare"]["mode"], "prev")
+    tlpp.probat.assertEquals(jItem["compare"]["deltaPct"], 20)
+    tlpp.probat.assertEquals(jItem["ttl"], 300)
+Return .T.
+
+Method kpiItem_PreviousZero_DeltaIsNull() as Logical Class test_tdash_core_indicators
+    Local jItem := tdash.core.u_kpiItem(catalog()[1], 120, .T., "yoy", 0, "2026-10-20T10:00:00") as Json
+
+    tlpp.probat.assertEquals(ValType(jItem["compare"]["deltaPct"]), "U")
+Return .T.

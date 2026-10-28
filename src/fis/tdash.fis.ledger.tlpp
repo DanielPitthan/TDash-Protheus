@@ -1,0 +1,294 @@
+#include 'tlpp-core.th'
+#include 'totvs.ch'
+
+namespace tdash.fis
+
+/*/{Protheus.doc} u_ledgerTaxes
+Tributos da centralização de débitos e créditos, na ordem da tela: { chave, rótulo, entra no total }.
+CBS e IBS ficam fora do total: em 2026 são destacados na nota, mas compensados no PIS e na COFINS.
+@type user function
+@author TDash
+@since 27/10/2026
+@return array, { { chave, rótulo, total }, ... }
+/*/
+User Function ledgerTaxes() as array
+return {;
+    { "icms",    "ICMS",        .T. },;
+    { "icms_st", "ICMS-ST",     .T. },;
+    { "difal",   "DIFAL e FCP", .T. },;
+    { "ipi",     "IPI",         .T. },;
+    { "pis",     "PIS",         .T. },;
+    { "cofins",  "COFINS",      .T. },;
+    { "iss",     "ISS próprio", .T. },;
+    { "iss_ret", "ISS retido",  .T. },;
+    { "cbs",     "CBS",         .F. },;
+    { "ibs",     "IBS",         .F. } }
+
+/*/{Protheus.doc} u_ledgerFields
+Campos numéricos de uma linha da centralização: débito (_d) e crédito (_c) de cada tributo e o valor contábil das
+saídas (outValue, base da carga tributária).
+@type user function
+@author TDash
+@since 27/10/2026
+@return array, nomes dos campos
+/*/
+User Function ledgerFields() as array
+    local aTaxes  := u_ledgerTaxes() as array
+    local aFields := {} as array
+    local nX      := 0 as numeric
+
+    for nX := 1 to Len(aTaxes)
+        aAdd(aFields, aTaxes[nX][1] + "_d")
+        aAdd(aFields, aTaxes[nX][1] + "_c")
+    next nX
+    aAdd(aFields, "outValue")
+return aFields
+
+/*/{Protheus.doc} u_ledgerNewRow
+Linha da centralização zerada.
+@type user function
+@author TDash
+@since 27/10/2026
+@param cMonth, character, mês AAAA-MM (vazio para o total do período)
+@return json, { month, <campos de u_ledgerFields> }
+/*/
+User Function ledgerNewRow(cMonth as character) as json
+    local jRow    := jsonObject():new() as json
+    local aFields := u_ledgerFields() as array
+    local nX      := 0 as numeric
+
+    jRow["month"] := cMonth
+    for nX := 1 to Len(aFields)
+        jRow[aFields[nX]] := 0
+    next nX
+return jRow
+
+/*/{Protheus.doc} u_ledgerAccumulate
+Soma valores de um dia na linha do mês (cria a linha quando falta e mantém os meses em ordem).
+Só os campos de u_ledgerFields entram; os demais são ignorados.
+@type user function
+@author TDash
+@since 27/10/2026
+@param aMonths, array, linhas por mês (alterado)
+@param cDay, character, dia AAAAMMDD
+@param jValues, json, valores a somar (ex.: { icms_d: 10, icms_c: 4 })
+/*/
+User Function ledgerAccumulate(aMonths as array, cDay as character, jValues as json)
+    local aFields := u_ledgerFields() as array
+    local cMonth  := tdash.core.u_bucketKey(cDay, "month") as character
+    local nPos    := AScan(aMonths, {|x| x["month"] == cMonth}) as numeric
+    local nX      := 0 as numeric
+
+    if nPos == 0
+        aAdd(aMonths, u_ledgerNewRow(cMonth))
+        aSort(aMonths, , , {|a, b| a["month"] < b["month"]})
+        nPos := AScan(aMonths, {|x| x["month"] == cMonth})
+    endIf
+
+    for nX := 1 to Len(aFields)
+        if jValues:hasProperty(aFields[nX]) .and. valType(jValues[aFields[nX]]) == "N"
+            aMonths[nPos][aFields[nX]] += jValues[aFields[nX]]
+        endIf
+    next nX
+return
+
+/*/{Protheus.doc} u_ledgerSum
+Soma as linhas por mês num total do período.
+@type user function
+@author TDash
+@since 27/10/2026
+@param aMonths, array, linhas por mês
+@return json, linha total (month vazio)
+/*/
+User Function ledgerSum(aMonths as array) as json
+    local jSum    := u_ledgerNewRow("") as json
+    local aFields := u_ledgerFields() as array
+    local nX      := 0 as numeric
+    local nY      := 0 as numeric
+
+    for nX := 1 to Len(aMonths)
+        for nY := 1 to Len(aFields)
+            jSum[aFields[nY]] += aMonths[nX][aFields[nY]]
+        next nY
+    next nX
+return jSum
+
+/*/{Protheus.doc} u_ledgerTotals
+Débito, crédito e saldo somados dos tributos que entram no total (sem CBS e IBS).
+@type user function
+@author TDash
+@since 27/10/2026
+@param jRow, json, linha (mês ou total)
+@return json, { debit, credit, balance }
+/*/
+User Function ledgerTotals(jRow as json) as json
+    local jTotals := jsonObject():new() as json
+    local aTaxes  := u_ledgerTaxes() as array
+    local nX      := 0 as numeric
+
+    jTotals["debit"]  := 0
+    jTotals["credit"] := 0
+    for nX := 1 to Len(aTaxes)
+        if aTaxes[nX][3]
+            jTotals["debit"]  += jRow[aTaxes[nX][1] + "_d"]
+            jTotals["credit"] += jRow[aTaxes[nX][1] + "_c"]
+        endIf
+    next nX
+    jTotals["debit"]   := Round(jTotals["debit"], 2)
+    jTotals["credit"]  := Round(jTotals["credit"], 2)
+    jTotals["balance"] := Round(jTotals["debit"] - jTotals["credit"], 2)
+return jTotals
+
+/*/{Protheus.doc} u_ledgerStatus
+Situação do saldo: positivo = a recolher, negativo = credor.
+@type user function
+@author TDash
+@since 27/10/2026
+@param nBalance, numeric, saldo (débito - crédito)
+@return character, "A recolher" | "Credor" | "Zerado"
+/*/
+User Function ledgerStatus(nBalance as numeric) as character
+    local cStatus := "Zerado" as character
+
+    if nBalance > 0
+        cStatus := "A recolher"
+    elseIf nBalance < 0
+        cStatus := "Credor"
+    endIf
+return cStatus
+
+/*/{Protheus.doc} u_ledgerLines
+Linhas da tabela de centralização de uma filial: um tributo por linha e a linha de total (sem CBS e IBS).
+@type user function
+@author TDash
+@since 27/10/2026
+@param jSum, json, total do período (u_ledgerSum)
+@return array, linhas (json) { key, tax, debit, credit, balance, status }
+/*/
+User Function ledgerLines(jSum as json) as array
+    local aLines  := {} as array
+    local aTaxes  := u_ledgerTaxes() as array
+    local jTotals := u_ledgerTotals(jSum) as json
+    local nX      := 0 as numeric
+
+    for nX := 1 to Len(aTaxes)
+        aAdd(aLines, ledgerLine(aTaxes[nX][1], taxLabel(aTaxes[nX]), jSum[aTaxes[nX][1] + "_d"], jSum[aTaxes[nX][1] + "_c"]))
+    next nX
+    aAdd(aLines, ledgerLine("total", "Total (sem CBS e IBS)", jTotals["debit"], jTotals["credit"]))
+return aLines
+
+/*/{Protheus.doc} u_branchLines
+Linhas da centralização com todas as filiais: o saldo de cada tributo por filial (coluna b_<filial>) e a soma das
+filiais (coluna total). A última linha é o total sem CBS e IBS.
+@type user function
+@author TDash
+@since 27/10/2026
+@param aBranches, array, { { filial, total do período (u_ledgerSum) }, ... }
+@return array, linhas (json) { key, tax, b_<filial>..., total }
+/*/
+User Function branchLines(aBranches as array) as array
+    local aLines   := {} as array
+    local aTaxes   := u_ledgerTaxes() as array
+    local jLine    as json
+    local jTotals  as json
+    local nBalance := 0 as numeric
+    local nX       := 0 as numeric
+    local nY       := 0 as numeric
+
+    for nX := 1 to Len(aTaxes)
+        jLine := jsonObject():new()
+        jLine["key"]   := aTaxes[nX][1]
+        jLine["tax"]   := taxLabel(aTaxes[nX])
+        jLine["total"] := 0
+        for nY := 1 to Len(aBranches)
+            nBalance := Round(aBranches[nY][2][aTaxes[nX][1] + "_d"] - aBranches[nY][2][aTaxes[nX][1] + "_c"], 2)
+            jLine["b_" + AllTrim(aBranches[nY][1])] := nBalance
+            jLine["total"] += nBalance
+        next nY
+        jLine["total"] := Round(jLine["total"], 2)
+        aAdd(aLines, jLine)
+    next nX
+
+    jLine := jsonObject():new()
+    jLine["key"]   := "total"
+    jLine["tax"]   := "Total (sem CBS e IBS)"
+    jLine["total"] := 0
+    for nY := 1 to Len(aBranches)
+        jTotals := u_ledgerTotals(aBranches[nY][2])
+        jLine["b_" + AllTrim(aBranches[nY][1])] := jTotals["balance"]
+        jLine["total"] += jTotals["balance"]
+    next nY
+    jLine["total"] := Round(jLine["total"], 2)
+    aAdd(aLines, jLine)
+return aLines
+
+/*/{Protheus.doc} u_taxBurden
+Carga tributária das saídas: (ICMS + IPI + PIS + COFINS + ISS próprio) das saídas / valor contábil das saídas, em %.
+@type user function
+@author TDash
+@since 27/10/2026
+@param jSum, json, total do período (u_ledgerSum)
+@return numeric, percentual com 2 casas (0 sem saídas)
+/*/
+User Function taxBurden(jSum as json) as numeric
+    local nTaxes := jSum["icms_d"] + jSum["ipi_d"] + jSum["pis_d"] + jSum["cofins_d"] + jSum["iss_d"] as numeric
+    local nPct   := 0 as numeric
+
+    if jSum["outValue"] > 0
+        nPct := Round((nTaxes / jSum["outValue"]) * 100, 2)
+    endIf
+return nPct
+
+/*/{Protheus.doc} u_ncmLabel
+Rótulo da classificação fiscal: "32074010" vira "3207.40.10"; vazio ou zerado vira "Sem NCM".
+@type user function
+@author TDash
+@since 27/10/2026
+@param cNcm, character, NCM (FT_POSIPI)
+@return character, rótulo
+/*/
+User Function ncmLabel(cNcm as character) as character
+    local cCode  := AllTrim(cNcm) as character
+    local cLabel := "Sem NCM" as character
+
+    if !Empty(cCode) .and. !(cCode == Replicate("0", Len(cCode)))
+        cLabel := cCode
+        if Len(cCode) == 8
+            cLabel := Transform(cCode, "@R 9999.99.99")
+        endIf
+    endIf
+return cLabel
+
+/*/{Protheus.doc} ledgerLine
+Uma linha da tabela da filial.
+@type static function
+@author TDash
+@since 27/10/2026
+@return json, { key, tax, debit, credit, balance, status }
+/*/
+Static Function ledgerLine(cKey as character, cLabel as character, nDebit as numeric, nCredit as numeric) as json
+    local jLine := jsonObject():new() as json
+
+    jLine["key"]     := cKey
+    jLine["tax"]     := cLabel
+    jLine["debit"]   := Round(nDebit, 2)
+    jLine["credit"]  := Round(nCredit, 2)
+    jLine["balance"] := Round(nDebit - nCredit, 2)
+    jLine["status"]  := u_ledgerStatus(jLine["balance"])
+return jLine
+
+/*/{Protheus.doc} taxLabel
+Rótulo do tributo na tabela; os que não entram no total levam a marca "(fora do total)".
+@type static function
+@author TDash
+@since 27/10/2026
+@param aTax, array, { chave, rótulo, total }
+@return character, rótulo
+/*/
+Static Function taxLabel(aTax as array) as character
+    local cLabel := aTax[2] as character
+
+    if !aTax[3]
+        cLabel += " (fora do total)"
+    endIf
+return cLabel

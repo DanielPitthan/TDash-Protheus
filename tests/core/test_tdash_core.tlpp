@@ -1,0 +1,142 @@
+#include "tlpp-core.th"
+#include "tlpp-probat.th"
+
+namespace tests.core
+
+/*/{Protheus.doc} test_tdash_core
+Testes PROBAT das funções do núcleo TDash que não acessam banco.
+Execução: appserver.exe -console -consolelog -run=tlpp.probat.run -env={AMBIENTE}
+@type class
+@author TDash
+@since 20/10/2026
+/*/
+@TestFixture()
+Class test_tdash_core
+    Public Method New() as Object
+
+    @Test('parseDate: data válida AAAAMMDD')
+    Public Method parseDate_ValidDate_ReturnsDate() as Logical
+
+    @Test('parseDate: formato inválido ou dia inexistente devolve vazio')
+    Public Method parseDate_InvalidInput_ReturnsEmpty() as Logical
+
+    @Test('parseCodeList: lista válida remove repetidos')
+    Public Method parseCodeList_ValidList_ReturnsUniqueCodes() as Logical
+
+    @Test('parseCodeList: código grande ou com caractere proibido invalida tudo')
+    Public Method parseCodeList_UnsafeCode_ReturnsEmpty() as Logical
+
+    @Test('parseRoleLines: papéis permitidos preenchem o json')
+    Public Method parseRoleLines_AllowedRoles_FillsJson() as Logical
+
+    @Test('parseRoleLines: papel desconhecido ou par incompleto é inválido')
+    Public Method parseRoleLines_InvalidInput_ReturnsFalse() as Logical
+
+    @Test('parseInt: padrão, limite e texto inválido')
+    Public Method parseInt_Inputs_ReturnsExpected() as Logical
+
+    @Test('TDashPeriod: sem datas usa início do mês até hoje')
+    Public Method period_NoDates_UsesMonthToDate() as Logical
+
+    @Test('TDashPeriod: compare prev usa período anterior de mesma duração')
+    Public Method period_ComparePrev_ReturnsPreviousRange() as Logical
+
+    @Test('TDashPeriod: compare yoy usa mesmo período do ano anterior')
+    Public Method period_CompareYoy_ReturnsLastYearRange() as Logical
+
+    @Test('TDashPeriod: período acima de 24 meses é recusado')
+    Public Method period_TooLong_ReturnsError() as Logical
+
+    @Test('TDashPeriod: datas invertidas ou compare inválido são recusados')
+    Public Method period_InvalidInput_ReturnsError() as Logical
+EndClass
+
+Method New() as Object Class test_tdash_core
+Return Self
+
+Method parseDate_ValidDate_ReturnsDate() as Logical Class test_tdash_core
+    tlpp.probat.assertEquals(DToS(tdash.core.u_parseDate("20261020")), "20261020")
+    tlpp.probat.assertEquals(DToS(tdash.core.u_parseDate("20240229")), "20240229")
+Return .T.
+
+Method parseDate_InvalidInput_ReturnsEmpty() as Logical Class test_tdash_core
+    tlpp.probat.assertEquals(Empty(tdash.core.u_parseDate("20260231")), .T.)
+    tlpp.probat.assertEquals(Empty(tdash.core.u_parseDate("2026-10-20")), .T.)
+    tlpp.probat.assertEquals(Empty(tdash.core.u_parseDate("2026102")), .T.)
+    tlpp.probat.assertEquals(Empty(tdash.core.u_parseDate("")), .T.)
+Return .T.
+
+Method parseCodeList_ValidList_ReturnsUniqueCodes() as Logical Class test_tdash_core
+    Local aResult := tdash.core.u_parseCodeList("101, 102,101", 3, 30) as Array
+
+    tlpp.probat.assertEquals(Len(aResult), 2)
+    tlpp.probat.assertEquals(aResult[1], "101")
+    tlpp.probat.assertEquals(aResult[2], "102")
+Return .T.
+
+Method parseCodeList_UnsafeCode_ReturnsEmpty() as Logical Class test_tdash_core
+    tlpp.probat.assertEquals(Len(tdash.core.u_parseCodeList("1011", 3, 30)), 0)
+    tlpp.probat.assertEquals(Len(tdash.core.u_parseCodeList("10'", 3, 30)), 0)
+    tlpp.probat.assertEquals(Len(tdash.core.u_parseCodeList("1,2,3", 3, 2)), 0)
+Return .T.
+
+Method parseRoleLines_AllowedRoles_FillsJson() as Logical Class test_tdash_core
+    Local jLines := JsonObject():New() as Json
+    Local lValid := .F. as Logical
+
+    lValid := tdash.core.u_parseRoleLines("netRevenue:3.01,netProfit:3.09", { "netRevenue", "netProfit" }, 20, jLines)
+    tlpp.probat.assertEquals(lValid, .T.)
+    tlpp.probat.assertEquals(jLines["netRevenue"], "3.01")
+    tlpp.probat.assertEquals(jLines["netProfit"], "3.09")
+Return .T.
+
+Method parseRoleLines_InvalidInput_ReturnsFalse() as Logical Class test_tdash_core
+    tlpp.probat.assertEquals(tdash.core.u_parseRoleLines("hack:1", { "netRevenue" }, 20, JsonObject():New()), .F.)
+    tlpp.probat.assertEquals(tdash.core.u_parseRoleLines("netRevenue", { "netRevenue" }, 20, JsonObject():New()), .F.)
+Return .T.
+
+Method parseInt_Inputs_ReturnsExpected() as Logical Class test_tdash_core
+    tlpp.probat.assertEquals(tdash.core.u_parseInt("", 20, 1, 100), 20)
+    tlpp.probat.assertEquals(tdash.core.u_parseInt("50", 20, 1, 100), 50)
+    tlpp.probat.assertEquals(tdash.core.u_parseInt("101", 20, 1, 100), -1)
+    tlpp.probat.assertEquals(tdash.core.u_parseInt("1a", 20, 1, 100), -1)
+Return .T.
+
+Method period_NoDates_UsesMonthToDate() as Logical Class test_tdash_core
+    Local oPeriod := tdash.core.TDashPeriod():New() as Object
+
+    tlpp.probat.assertEquals(oPeriod:fromQuery("", "", "", SToD("20261020")), .T.)
+    tlpp.probat.assertEquals(DToS(oPeriod:dFrom), "20261001")
+    tlpp.probat.assertEquals(DToS(oPeriod:dTo), "20261020")
+    tlpp.probat.assertEquals(oPeriod:hasCompare(), .F.)
+Return .T.
+
+Method period_ComparePrev_ReturnsPreviousRange() as Logical Class test_tdash_core
+    Local oPeriod := tdash.core.TDashPeriod():New() as Object
+
+    tlpp.probat.assertEquals(oPeriod:fromQuery("20261011", "20261020", "prev", SToD("20261020")), .T.)
+    tlpp.probat.assertEquals(DToS(oPeriod:compareFrom()), "20261001")
+    tlpp.probat.assertEquals(DToS(oPeriod:compareTo()), "20261010")
+Return .T.
+
+Method period_CompareYoy_ReturnsLastYearRange() as Logical Class test_tdash_core
+    Local oPeriod := tdash.core.TDashPeriod():New() as Object
+
+    tlpp.probat.assertEquals(oPeriod:fromQuery("20261001", "20261020", "YOY", SToD("20261020")), .T.)
+    tlpp.probat.assertEquals(DToS(oPeriod:compareFrom()), "20251001")
+    tlpp.probat.assertEquals(DToS(oPeriod:compareTo()), "20251020")
+Return .T.
+
+Method period_TooLong_ReturnsError() as Logical Class test_tdash_core
+    Local oPeriod := tdash.core.TDashPeriod():New() as Object
+
+    tlpp.probat.assertEquals(oPeriod:fromQuery("20240101", "20260101", "", SToD("20261020")), .F.)
+    tlpp.probat.assertEquals(Empty(oPeriod:cError), .F.)
+Return .T.
+
+Method period_InvalidInput_ReturnsError() as Logical Class test_tdash_core
+    Local oPeriod := tdash.core.TDashPeriod():New() as Object
+
+    tlpp.probat.assertEquals(oPeriod:fromQuery("20261020", "20261001", "", SToD("20261020")), .F.)
+    tlpp.probat.assertEquals(oPeriod:fromQuery("20261001", "20261020", "week", SToD("20261020")), .F.)
+Return .T.

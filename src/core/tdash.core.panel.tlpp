@@ -1,0 +1,216 @@
+#include 'tlpp-core.th'
+#include 'totvs.ch'
+
+namespace tdash.core
+
+/*/{Protheus.doc} TDashPanelBuilder
+Monta o JSON de um painel personalizado do TDash (contrato em docs/09-painel-personalizado.md):
+{ title, ttl, generatedAt, widgets: [ { type: kpi | columnChart | barChart | table, ... } ] }.
+O app mostra os widgets na ordem em que foram adicionados. Não acessa banco.
+Uso:
+    oPanel := tdash.core.TDashPanelBuilder():new("Meu painel", 300)
+    oPanel:addKpi("Pedidos", 42, "un")
+    oRest:setResponse(oHelper:getResponse(oPanel:getJson()))
+@type class
+@author TDash
+@since 23/10/2026
+@version 1.0
+/*/
+class TDashPanelBuilder
+    private data cTitle   as character
+    private data nTtl     as numeric
+    private data aWidgets as array
+
+    public method new(cTitle as character, nTtl as numeric)
+    public method addKpi(cName as character, nValue as numeric, cUnit as character)
+    public method addKpiTarget(cName as character, nValue as numeric, nTarget as numeric, cUnit as character, cDirection as character)
+    public method addColumnChart(cName as character, cAxisX as character, cAxisY as character, cUnit as character, aCategories as array, aSeries as array)
+    public method addBarChart(cName as character, cAxisX as character, cAxisY as character, cUnit as character, aCategories as array, aSeries as array)
+    public method addTable(cName as character, aColumns as array, aRows as array)
+    public method widgetCount() as numeric
+    public method getJson() as json
+endclass
+
+/*/{Protheus.doc} new
+Construtor.
+@type method
+@author TDash
+@since 23/10/2026
+@param cTitle, character, título do painel (o app usa o nome cadastrado pelo usuário quando vazio)
+@param nTtl, numeric, segundos de validade no cache do app (0 = sempre busca de novo)
+/*/
+method new(cTitle as character, nTtl as numeric) class TDashPanelBuilder
+    ::cTitle   := cTitle
+    ::nTtl     := nTtl
+    ::aWidgets := {}
+return self
+
+/*/{Protheus.doc} addKpi
+Cartão de KPI sem meta.
+@type method
+@author TDash
+@since 23/10/2026
+@param cName, character, título do cartão
+@param nValue, numeric, valor
+@param cUnit, character, BRL | PCT | DAYS | HOURS | TIMES | PER_HOUR | QTY | COUNT | vazio (número)
+/*/
+method addKpi(cName as character, nValue as numeric, cUnit as character) class TDashPanelBuilder
+    local jWidget := jsonObject():new() as json
+
+    jWidget["type"]  := "kpi"
+    jWidget["name"]  := cName
+    jWidget["value"] := nValue
+    jWidget["unit"]  := cUnit
+    aAdd(::aWidgets, jWidget)
+return
+
+/*/{Protheus.doc} addKpiTarget
+Cartão de KPI com meta. O app mostra o percentual atingido e a cor pelo sentido.
+@type method
+@author TDash
+@since 23/10/2026
+@param cName, character, título do cartão
+@param nValue, numeric, valor
+@param nTarget, numeric, meta
+@param cUnit, character, BRL | PCT | DAYS | HOURS | TIMES | PER_HOUR | QTY | COUNT | vazio (número)
+@param cDirection, character, up_is_good (maior é melhor) | down_is_good (menor é melhor) | neutral; outro valor vira up_is_good
+/*/
+method addKpiTarget(cName as character, nValue as numeric, nTarget as numeric, cUnit as character, cDirection as character) class TDashPanelBuilder
+    local jWidget := jsonObject():new() as json
+    local cSense  := Lower(AllTrim(cDirection)) as character
+
+    if AScan({ "up_is_good", "down_is_good", "neutral" }, {|x| x == cSense}) == 0
+        cSense := "up_is_good"
+    endIf
+
+    jWidget["type"]      := "kpi"
+    jWidget["name"]      := cName
+    jWidget["value"]     := nValue
+    jWidget["target"]    := nTarget
+    jWidget["unit"]      := cUnit
+    jWidget["direction"] := cSense
+    aAdd(::aWidgets, jWidget)
+return
+
+/*/{Protheus.doc} addColumnChart
+Gráfico de colunas (barras verticais), uma ou mais séries.
+@type method
+@author TDash
+@since 23/10/2026
+@param cName, character, título do gráfico
+@param cAxisX, character, rótulo do eixo X (pode ser vazio)
+@param cAxisY, character, rótulo do eixo Y (pode ser vazio)
+@param cUnit, character, unidade dos valores (BRL | PCT | DAYS | HOURS | TIMES | PER_HOUR | QTY | COUNT | vazio)
+@param aCategories, array, rótulos do eixo X (texto), ex.: { "Jan", "Fev" }
+@param aSeries, array, { { nome da série, { valores } }, ... }, cada série com um valor por categoria
+/*/
+method addColumnChart(cName as character, cAxisX as character, cAxisY as character, cUnit as character, aCategories as array, aSeries as array) class TDashPanelBuilder
+    aAdd(::aWidgets, chartJson("columnChart", cName, cAxisX, cAxisY, cUnit, aCategories, aSeries))
+return
+
+/*/{Protheus.doc} addBarChart
+Gráfico de barras horizontais, uma ou mais séries. Mesmos parâmetros de addColumnChart.
+@type method
+@author TDash
+@since 23/10/2026
+@param cName, character, título do gráfico
+@param cAxisX, character, rótulo do eixo das categorias (pode ser vazio)
+@param cAxisY, character, rótulo do eixo dos valores (pode ser vazio)
+@param cUnit, character, unidade dos valores (BRL | PCT | DAYS | HOURS | TIMES | PER_HOUR | QTY | COUNT | vazio)
+@param aCategories, array, rótulos das categorias (texto)
+@param aSeries, array, { { nome da série, { valores } }, ... }
+/*/
+method addBarChart(cName as character, cAxisX as character, cAxisY as character, cUnit as character, aCategories as array, aSeries as array) class TDashPanelBuilder
+    aAdd(::aWidgets, chartJson("barChart", cName, cAxisX, cAxisY, cUnit, aCategories, aSeries))
+return
+
+/*/{Protheus.doc} addTable
+Tabela. Cada coluna tem rótulo e unidade; números são formatados pelo app conforme a unidade da coluna.
+@type method
+@author TDash
+@since 23/10/2026
+@param cName, character, título da tabela
+@param aColumns, array, { { rótulo, unidade }, ... } (unidade vazia = texto ou número sem formato)
+@param aRows, array, { { valor da coluna 1, valor da coluna 2, ... }, ... } (texto ou número)
+/*/
+method addTable(cName as character, aColumns as array, aRows as array) class TDashPanelBuilder
+    local jWidget  := jsonObject():new() as json
+    local jColumn  as json
+    local aColumnJ := {} as array
+    local nX       := 0 as numeric
+
+    for nX := 1 to Len(aColumns)
+        jColumn := jsonObject():new()
+        jColumn["label"] := aColumns[nX][1]
+        jColumn["unit"]  := aColumns[nX][2]
+        aAdd(aColumnJ, jColumn)
+    next nX
+
+    jWidget["type"]    := "table"
+    jWidget["name"]    := cName
+    jWidget["columns"] := aColumnJ
+    jWidget["data"]    := aRows
+    aAdd(::aWidgets, jWidget)
+return
+
+/*/{Protheus.doc} widgetCount
+Quantidade de widgets adicionados.
+@type method
+@author TDash
+@since 23/10/2026
+@return numeric, quantidade
+/*/
+method widgetCount() as numeric class TDashPanelBuilder
+return Len(::aWidgets)
+
+/*/{Protheus.doc} getJson
+Corpo da resposta, pronto para TDashResponseHelper:getResponse.
+@type method
+@author TDash
+@since 23/10/2026
+@return json, { title, ttl, generatedAt, widgets }
+/*/
+method getJson() as json class TDashPanelBuilder
+    local jBody := jsonObject():new() as json
+
+    jBody["title"]       := ::cTitle
+    jBody["ttl"]         := ::nTtl
+    jBody["generatedAt"] := Transform(DToS(Date()), "@R 9999-99-99") + "T" + Time()
+    jBody["widgets"]     := ::aWidgets
+return jBody
+
+/*/{Protheus.doc} chartJson
+Widget de gráfico (colunas ou barras).
+@type static function
+@author TDash
+@since 23/10/2026
+@param cType, character, columnChart | barChart
+@param cName, character, título
+@param cAxisX, character, rótulo do eixo X
+@param cAxisY, character, rótulo do eixo Y
+@param cUnit, character, unidade
+@param aCategories, array, rótulos das categorias
+@param aSeries, array, { { nome, { valores } }, ... }
+@return json, widget
+/*/
+Static Function chartJson(cType as character, cName as character, cAxisX as character, cAxisY as character, cUnit as character, aCategories as array, aSeries as array) as json
+    local jWidget  := jsonObject():new() as json
+    local jSeries  as json
+    local aSeriesJ := {} as array
+    local nX       := 0 as numeric
+
+    for nX := 1 to Len(aSeries)
+        jSeries := jsonObject():new()
+        jSeries["name"] := aSeries[nX][1]
+        jSeries["data"] := aSeries[nX][2]
+        aAdd(aSeriesJ, jSeries)
+    next nX
+
+    jWidget["type"]       := cType
+    jWidget["name"]       := cName
+    jWidget["axisX"]      := cAxisX
+    jWidget["axisY"]      := cAxisY
+    jWidget["unit"]       := cUnit
+    jWidget["categories"] := aCategories
+    jWidget["series"]     := aSeriesJ
+return jWidget

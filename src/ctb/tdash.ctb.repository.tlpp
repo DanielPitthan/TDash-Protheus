@@ -1,0 +1,269 @@
+#include 'tlpp-core.th'
+#include 'totvs.ch'
+
+namespace tdash.ctb
+
+/*/{Protheus.doc} TDashCtbRepository
+Consultas da Contabilidade: Visões Gerenciais (CVE cabeçalho, CTS linhas) e saldos contábeis por conta (CQ0) e
+por conta x centro de custo (CQ2). Moeda 01 e saldo real (tipo 1).
+Cada linha da visão (CTS_CONTAG) pode ter várias linhas de faixa na CTS; os saldos das faixas se somam. A faixa de
+conta vem de CTS_CT1INI/FIM; se a faixa de centro de custo (CTS_CTTINI/FIM) está preenchida, o saldo vem da CQ2.
+O movimento da DRE deixa de fora os lançamentos de apuração (CQ0_LP = S ou Z); o saldo do Balanço acumula tudo.
+Regras: docs/10-catalogo-de-indicadores.md (Contabilidade).
+@type class
+@author TDash
+@since 21/10/2026
+@version 1.0
+/*/
+class TDashCtbRepository
+    public method new()
+
+    public method views() as array
+    public method viewExists(cView as character) as logical
+    public method viewLines(cView as character) as array
+    public method accountBalances(cView as character, cMode as character, dFrom as date, dTo as date) as array
+    public method unsupportedLines(cView as character) as numeric
+
+    private method balanceRows(lByCostCenter as logical, cView as character, cMode as character, dFrom as date, dTo as date) as array
+    private method numberOf(cAlias as character, cField as character) as numeric
+endclass
+
+method new() class TDashCtbRepository
+return self
+
+/*/{Protheus.doc} views
+Visões gerenciais da filial que têm linhas analíticas com faixa de conta (as demais, como o fluxo de caixa,
+não são calculáveis a partir dos saldos).
+@type method
+@author TDash
+@since 21/10/2026
+@return array, { { código, descrição } }
+/*/
+method views() as array class TDashCtbRepository
+    local aViews := {} as array
+    local cQry   := "" as character
+    local cAlias := "" as character
+    local oQuery as object
+
+    cQry := " SELECT CVE.CVE_CODIGO CODIGO, CVE.CVE_DESCRI DESCRICAO "
+    cQry += " FROM " + RetSqlName("CVE") + " CVE "
+    cQry += " WHERE CVE.CVE_FILIAL = ? "
+    cQry += " AND CVE.D_E_L_E_T_ = ' ' "
+    cQry += " AND EXISTS ( SELECT 1 FROM " + RetSqlName("CTS") + " CTS "
+    cQry += "   WHERE CTS.CTS_FILIAL = ? AND CTS.CTS_CODPLA = CVE.CVE_CODIGO "
+    cQry += "   AND CTS.CTS_CLASSE = '2' AND CTS.CTS_CT1INI <> ' ' AND CTS.D_E_L_E_T_ = ' ' ) "
+    cQry += " ORDER BY CVE.CVE_CODIGO "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    oQuery:setString(1, FWxFilial("CVE"))
+    oQuery:setString(2, FWxFilial("CTS"))
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof())
+            aAdd(aViews, { AllTrim((cAlias)->CODIGO), AllTrim((cAlias)->DESCRICAO) })
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+return aViews
+
+/*/{Protheus.doc} viewExists
+Diz se a visão existe na filial e é calculável (ver views).
+@type method
+@author TDash
+@since 21/10/2026
+@param cView, character, código da visão (CTS_CODPLA)
+@return logical, .T. quando existe
+/*/
+method viewExists(cView as character) as logical class TDashCtbRepository
+    local aViews := ::views() as array
+return AScan(aViews, {|x| x[1] == cView}) > 0
+
+/*/{Protheus.doc} viewLines
+Linhas da visão na ordem de CTS_ORDEM, uma por CTS_CONTAG (as faixas de uma mesma linha são agrupadas).
+@type method
+@author TDash
+@since 21/10/2026
+@param cView, character, código da visão
+@return array, { { chave, superior, descrição, classe, identificador, natureza, ordem } }
+/*/
+method viewLines(cView as character) as array class TDashCtbRepository
+    local aLines := {} as array
+    local cQry   := "" as character
+    local cAlias := "" as character
+    local oQuery as object
+
+    cQry := " SELECT CTS.CTS_CONTAG CONTAG, MAX(CTS.CTS_CTASUP) SUPERIOR, MAX(CTS.CTS_DESCCG) DESCRICAO, "
+    cQry += " MAX(CTS.CTS_CLASSE) CLASSE, MAX(CTS.CTS_IDENT) IDENT, MAX(CTS.CTS_NORMAL) NORMAL, MIN(CTS.CTS_ORDEM) ORDEM "
+    cQry += " FROM " + RetSqlName("CTS") + " CTS "
+    cQry += " WHERE CTS.CTS_FILIAL = ? "
+    cQry += " AND CTS.CTS_CODPLA = ? "
+    cQry += " AND CTS.D_E_L_E_T_ = ' ' "
+    cQry += " GROUP BY CTS.CTS_CONTAG ORDER BY MIN(CTS.CTS_ORDEM), CTS.CTS_CONTAG "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    oQuery:setString(1, FWxFilial("CTS"))
+    oQuery:setString(2, cView)
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof())
+            aAdd(aLines, { AllTrim((cAlias)->CONTAG), AllTrim((cAlias)->SUPERIOR), AllTrim((cAlias)->DESCRICAO), ;
+                AllTrim((cAlias)->CLASSE), AllTrim((cAlias)->IDENT), AllTrim((cAlias)->NORMAL), AllTrim((cAlias)->ORDEM) })
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+return aLines
+
+/*/{Protheus.doc} accountBalances
+Débito e crédito de cada linha analítica da visão. Faixas sem centro de custo vêm da CQ0; faixas com centro de
+custo vêm da CQ2. Linhas com faixa de item ou de classe de valor não entram (ver unsupportedLines).
+@type method
+@author TDash
+@since 21/10/2026
+@param cView, character, código da visão
+@param cMode, character, movement (DRE: movimento de dFrom a dTo, sem apuração) | balance (Balanço: acumulado até dTo)
+@param dFrom, date, início (só movement)
+@param dTo, date, fim ou data do saldo
+@return array, { { chave da linha, débito, crédito } }
+/*/
+method accountBalances(cView as character, cMode as character, dFrom as date, dTo as date) as array class TDashCtbRepository
+    local aBalances := {} as array
+    local aRows     := {} as array
+    local nPos      := 0 as numeric
+    local nX        := 0 as numeric
+    local nPass     := 0 as numeric
+
+    for nPass := 1 to 2
+        aRows := ::balanceRows(nPass == 2, cView, cMode, dFrom, dTo)
+        for nX := 1 to Len(aRows)
+            nPos := AScan(aBalances, {|x| x[1] == aRows[nX][1]})
+            if nPos == 0
+                aAdd(aBalances, { aRows[nX][1], aRows[nX][2], aRows[nX][3] })
+            else
+                aBalances[nPos][2] += aRows[nX][2]
+                aBalances[nPos][3] += aRows[nX][3]
+            endIf
+        next nX
+    next nPass
+return aBalances
+
+/*/{Protheus.doc} unsupportedLines
+Quantidade de linhas analíticas da visão que usam faixa de item contábil ou de classe de valor, ainda não calculadas.
+@type method
+@author TDash
+@since 21/10/2026
+@param cView, character, código da visão
+@return numeric, quantidade de linhas (CTS_CONTAG distintos)
+/*/
+method unsupportedLines(cView as character) as numeric class TDashCtbRepository
+    local nTotal := 0 as numeric
+    local cQry   := "" as character
+    local oQuery as object
+
+    cQry := " SELECT COUNT(DISTINCT CTS.CTS_CONTAG) TOTAL "
+    cQry += " FROM " + RetSqlName("CTS") + " CTS "
+    cQry += " WHERE CTS.CTS_FILIAL = ? "
+    cQry += " AND CTS.CTS_CODPLA = ? "
+    cQry += " AND CTS.CTS_CLASSE = '2' "
+    cQry += " AND (CTS.CTS_CTDINI <> ' ' OR CTS.CTS_CTDFIM <> ' ' OR CTS.CTS_CTHINI <> ' ' OR CTS.CTS_CTHFIM <> ' ') "
+    cQry += " AND CTS.D_E_L_E_T_ = ' ' "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    oQuery:setString(1, FWxFilial("CTS"))
+    oQuery:setString(2, cView)
+    if oQuery:open()
+        nTotal := ::numberOf(oQuery:getAlias(), "TOTAL")
+        oQuery:close()
+    endIf
+return nTotal
+
+/*/{Protheus.doc} balanceRows
+Uma passada de saldos: faixas sem centro de custo (CQ0) ou com centro de custo (CQ2).
+Binds: filial do saldo, data(s), filial da CTS, visão.
+@type method
+@author TDash
+@since 21/10/2026
+@param lByCostCenter, logical, .T. usa a CQ2 e as faixas com centro de custo; .F. usa a CQ0 e as faixas sem
+@param cView, character, código da visão
+@param cMode, character, movement | balance
+@param dFrom, date, início (só movement)
+@param dTo, date, fim ou data do saldo
+@return array, { { chave da linha, débito, crédito } }
+/*/
+method balanceRows(lByCostCenter as logical, cView as character, cMode as character, dFrom as date, dTo as date) as array class TDashCtbRepository
+    local aRows   := {} as array
+    local cTable  := "CQ0" as character
+    local cQry    := "" as character
+    local cAlias  := "" as character
+    local nBind   := 1 as numeric
+    local oQuery  as object
+
+    if lByCostCenter
+        cTable := "CQ2"
+    endIf
+
+    cQry := " SELECT CTS.CTS_CONTAG CONTAG, SUM(CQ." + cTable + "_DEBITO) DEB, SUM(CQ." + cTable + "_CREDIT) CRED "
+    cQry += " FROM " + RetSqlName("CTS") + " CTS "
+    cQry += " INNER JOIN " + RetSqlName(cTable) + " CQ ON CQ." + cTable + "_FILIAL = ? "
+    cQry += "   AND CQ." + cTable + "_CONTA >= CTS.CTS_CT1INI AND CQ." + cTable + "_CONTA <= CTS.CTS_CT1FIM "
+    if lByCostCenter
+        cQry += " AND CQ." + cTable + "_CCUSTO >= CTS.CTS_CTTINI AND CQ." + cTable + "_CCUSTO <= CTS.CTS_CTTFIM "
+    endIf
+    cQry += "   AND CQ." + cTable + "_MOEDA = '01' AND CQ." + cTable + "_TPSALD = '1' "
+    if cMode == "movement"
+        cQry += " AND CQ." + cTable + "_DATA BETWEEN ? AND ? AND CQ." + cTable + "_LP NOT IN ('S', 'Z') "
+    else
+        cQry += " AND CQ." + cTable + "_DATA <= ? "
+    endIf
+    cQry += "   AND CQ.D_E_L_E_T_ = ' ' "
+    cQry += " WHERE CTS.CTS_FILIAL = ? "
+    cQry += " AND CTS.CTS_CODPLA = ? "
+    cQry += " AND CTS.CTS_CLASSE = '2' "
+    cQry += " AND CTS.CTS_CT1INI <> ' ' "
+    cQry += " AND CTS.CTS_CTDINI = ' ' AND CTS.CTS_CTDFIM = ' ' AND CTS.CTS_CTHINI = ' ' AND CTS.CTS_CTHFIM = ' ' "
+    if lByCostCenter
+        cQry += " AND (CTS.CTS_CTTINI <> ' ' OR CTS.CTS_CTTFIM <> ' ') "
+    else
+        cQry += " AND CTS.CTS_CTTINI = ' ' AND CTS.CTS_CTTFIM = ' ' "
+    endIf
+    cQry += " AND CTS.D_E_L_E_T_ = ' ' "
+    cQry += " GROUP BY CTS.CTS_CONTAG "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    oQuery:setString(nBind++, FWxFilial(cTable))
+    if cMode == "movement"
+        oQuery:setString(nBind++, DToS(dFrom))
+    endIf
+    oQuery:setString(nBind++, DToS(dTo))
+    oQuery:setString(nBind++, FWxFilial("CTS"))
+    oQuery:setString(nBind++, cView)
+
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof())
+            aAdd(aRows, { AllTrim((cAlias)->CONTAG), (cAlias)->DEB, (cAlias)->CRED })
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+return aRows
+
+/*/{Protheus.doc} numberOf
+Valor numérico de um campo da linha atual; 0 quando nulo.
+@type method
+@author TDash
+@since 21/10/2026
+@return numeric, valor ou 0
+/*/
+method numberOf(cAlias as character, cField as character) as numeric class TDashCtbRepository
+    local nValue := 0 as numeric
+    local xValue
+
+    if !(cAlias)->(Eof())
+        xValue := (cAlias)->(FieldGet(FieldPos(cField)))
+        if valType(xValue) == "N"
+            nValue := xValue
+        endIf
+    endIf
+return nValue

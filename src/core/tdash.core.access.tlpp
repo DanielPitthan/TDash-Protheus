@@ -1,0 +1,145 @@
+#include 'tlpp-core.th'
+#include 'totvs.ch'
+
+namespace tdash.core
+
+/*/{Protheus.doc} u_moduleCodes
+Módulos do TDash e o número de cada um no Protheus (nModulo), na ordem do catálogo do app.
+@type user function
+@author TDash
+@since 23/10/2026
+@return array, { { sigla, número }, ... }
+/*/
+User Function moduleCodes() as array
+return {;
+    { "FIN",  6 },;
+    { "COM",  2 },;
+    { "FAT",  5 },;
+    { "PCP", 10 },;
+    { "EST",  4 },;
+    { "GPE",  7 },;
+    { "CTB", 34 },;
+    { "FIS",  9 } }
+
+/*/{Protheus.doc} u_menuModules
+Números dos módulos liberados numa lista de menus do cadastro de usuário ou de grupo (PswRet()[3] ou
+FWGrpMenu). Cada entrada tem o formato "MMN\caminho\menu.xnu": MM = número do módulo, N = nível de acesso
+ou "X" quando o módulo está sem acesso. Entradas vazias, sem menu ou fora do padrão são ignoradas.
+@type user function
+@author TDash
+@since 23/10/2026
+@param aMenus, array, entradas de menu (texto)
+@return array, números dos módulos liberados, sem repetição
+/*/
+User Function menuModules(aMenus as array) as array
+    local aModules := {} as array
+    local cEntry   := "" as character
+    local cNumber  := "" as character
+    local nModule  := 0 as numeric
+    local nX       := 0 as numeric
+
+    for nX := 1 to Len(aMenus)
+        if ValType(aMenus[nX]) == "C"
+            cEntry  := AllTrim(aMenus[nX])
+            cNumber := Left(cEntry, 2)
+            if Len(cEntry) > 3 .and. tdash.core.u_isDigits(cNumber) .and. Upper(SubStr(cEntry, 3, 1)) != "X"
+                nModule := Val(cNumber)
+                if nModule > 0 .and. AScan(aModules, nModule) == 0
+                    aAdd(aModules, nModule)
+                endIf
+            endIf
+        endIf
+    next nX
+return aModules
+
+/*/{Protheus.doc} u_userModules
+Siglas dos módulos do TDash liberados ao usuário, lidas da aba Menus do cadastro do usuário e dos seus
+grupos. Administrador vê todos. Com "Priorizar configuração do grupo" marcado, valem só os menus dos
+grupos; senão, os menus do usuário somados aos dos grupos.
+Só define o que o app mostra: o REST do Protheus continua validando usuário, filial e módulo em cada chamada.
+Os privilégios (rotinas) não entram aqui: liberam rotinas, não módulos.
+@type user function
+@author TDash
+@since 23/10/2026
+@param cUserId, character, código do usuário (RetCodUsr)
+@return array, siglas liberadas, na ordem de u_moduleCodes
+/*/
+User Function userModules(cUserId as character) as array
+    local aCodes   := tdash.core.u_moduleCodes() as array
+    local aAllowed := {} as array
+    local aNumbers := {} as array
+    local lAdmin   := FWIsAdmin(cUserId) as logical
+    local nX       := 0 as numeric
+
+    if !lAdmin
+        aNumbers := tdash.core.u_menuModules(tdash.core.u_userMenus(cUserId))
+    endIf
+    for nX := 1 to Len(aCodes)
+        if lAdmin .or. AScan(aNumbers, aCodes[nX][2]) > 0
+            aAdd(aAllowed, aCodes[nX][1])
+        endIf
+    next nX
+return aAllowed
+
+/*/{Protheus.doc} u_userMenus
+Entradas de menu que valem para o usuário: as dele e as dos grupos, conforme "Priorizar configuração do
+grupo" (PswRet()[2][11]). Também usada pelo diagnóstico u_tdAcessoDiag.
+@type user function
+@author TDash
+@since 23/10/2026
+@param cUserId, character, código do usuário
+@return array, entradas de menu (texto); vazio quando o usuário não existe
+/*/
+User Function userMenus(cUserId as character) as array
+    local aUser       := {} as array
+    local aGroups     := {} as array
+    local aOwn        := {} as array
+    local aMenus      := {} as array
+    local lGroupFirst := .F. as logical
+    local nX          := 0 as numeric
+
+    PswOrder(1)
+    if PswSeek(cUserId, .T.)
+        aUser := PswRet()
+        if Len(aUser) >= 1 .and. Len(aUser[1]) >= 10 .and. ValType(aUser[1][10]) == "A"
+            aGroups := aUser[1][10]
+        endIf
+        if Len(aUser) >= 2 .and. Len(aUser[2]) >= 11 .and. ValType(aUser[2][11]) == "L"
+            lGroupFirst := aUser[2][11]
+        endIf
+        if Len(aUser) >= 3 .and. ValType(aUser[3]) == "A"
+            aOwn := aUser[3]
+        endIf
+
+        if !(lGroupFirst .and. Len(aGroups) > 0)
+            for nX := 1 to Len(aOwn)
+                aAdd(aMenus, aOwn[nX])
+            next nX
+        endIf
+        for nX := 1 to Len(aGroups)
+            addGroupMenus(aGroups[nX], aMenus)
+        next nX
+    endIf
+return aMenus
+
+/*/{Protheus.doc} addGroupMenus
+Acrescenta em aMenus as entradas de menu de um grupo de usuários (FWGrpMenu).
+@type static function
+@author TDash
+@since 23/10/2026
+@param cGroupId, character, código do grupo
+@param aMenus, array, lista que recebe as entradas (alterada)
+/*/
+Static Function addGroupMenus(cGroupId as character, aMenus as array)
+    local aGroupMenus := {} as array
+    local nX          := 0 as numeric
+
+    if ValType(cGroupId) == "C" .and. !Empty(cGroupId)
+        aGroupMenus := FWGrpMenu(cGroupId)
+    endIf
+    if ValType(aGroupMenus) == "A"
+        for nX := 1 to Len(aGroupMenus)
+            aAdd(aMenus, aGroupMenus[nX])
+        next nX
+    endIf
+return

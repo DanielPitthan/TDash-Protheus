@@ -1,0 +1,71 @@
+#include "tlpp-core.th"
+#include "tlpp-probat.th"
+
+namespace tests.core
+
+/*/{Protheus.doc} test_tdash_core_access
+Testes PROBAT da leitura dos módulos liberados nas entradas de menu (u_menuModules), sem banco.
+Execução: appserver.exe -console -consolelog -run=tlpp.probat.run -env={AMBIENTE}
+@type class
+@author TDash
+@since 23/10/2026
+/*/
+@TestFixture()
+Class test_tdash_core_access
+    Public Method New() as Object
+
+    @Test('menuModules: módulo com nível de acesso é liberado')
+    Public Method menuModules_WithLevel_Allowed() as Logical
+
+    @Test('menuModules: módulo com X fica de fora')
+    Public Method menuModules_WithX_Denied() as Logical
+
+    @Test('menuModules: entradas vazias, sem menu ou fora do padrão são ignoradas')
+    Public Method menuModules_Invalid_Ignored() as Logical
+
+    @Test('menuModules: módulo repetido (usuário e grupo) aparece uma vez')
+    Public Method menuModules_Repeated_Once() as Logical
+
+    @Test('moduleCodes: oito módulos na ordem do catálogo do app')
+    Public Method moduleCodes_Catalog() as Logical
+EndClass
+
+Method New() as Object Class test_tdash_core_access
+Return Self
+
+Method menuModules_WithLevel_Allowed() as Logical Class test_tdash_core_access
+    Local aModules := tdash.core.u_menuModules({"065\system\sigafin.xnu", "349\system\sigactb.xnu"}) as Array
+
+    tlpp.probat.assertEquals(Len(aModules), 2)
+    tlpp.probat.assertEquals(aModules[1], 6)
+    tlpp.probat.assertEquals(aModules[2], 34)
+Return .T.
+
+Method menuModules_WithX_Denied() as Logical Class test_tdash_core_access
+    Local aModules := tdash.core.u_menuModules({"05X\system\sigafat.xnu", "02x\system\sigacom.xnu", "105\system\sigapcp.xnu"}) as Array
+
+    tlpp.probat.assertEquals(Len(aModules), 1)
+    tlpp.probat.assertEquals(aModules[1], 10)
+Return .T.
+
+Method menuModules_Invalid_Ignored() as Logical Class test_tdash_core_access
+    Local aModules := tdash.core.u_menuModules({"", "065", "AB5\system\x.xnu", "005\system\x.xnu", Nil}) as Array
+
+    tlpp.probat.assertEquals(Len(aModules), 0)
+Return .T.
+
+Method menuModules_Repeated_Once() as Logical Class test_tdash_core_access
+    Local aModules := tdash.core.u_menuModules({"065\system\sigafin.xnu", "06X\system\sigafin.xnu", "061\grupo\fin.xnu"}) as Array
+
+    tlpp.probat.assertEquals(Len(aModules), 1)
+    tlpp.probat.assertEquals(aModules[1], 6)
+Return .T.
+
+Method moduleCodes_Catalog() as Logical Class test_tdash_core_access
+    Local aCodes := tdash.core.u_moduleCodes() as Array
+
+    tlpp.probat.assertEquals(Len(aCodes), 8)
+    tlpp.probat.assertEquals(aCodes[1][1], "FIN")
+    tlpp.probat.assertEquals(aCodes[1][2], 6)
+    tlpp.probat.assertEquals(aCodes[8][1], "FIS")
+Return .T.

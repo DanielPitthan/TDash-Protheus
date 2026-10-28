@@ -1,0 +1,42 @@
+#include "tlpp-core.th"
+#include "tlpp-probat.th"
+
+namespace tests.com
+
+/*/{Protheus.doc} test_tdash_com_rules
+Testes PROBAT das regras de Compras sem banco.
+Execução: appserver.exe -console -consolelog -run=tlpp.probat.run -env={AMBIENTE}
+@type class
+@author TDash
+@since 25/10/2026
+/*/
+@TestFixture()
+Class test_tdash_com_rules
+    Public Method New() as Object
+
+    @Test('brlFactor: pedido em reais não muda')
+    Public Method brlFactor_Reais_IsOne() as Logical
+
+    @Test('brlFactor: moeda estrangeira com taxa usa a taxa do pedido')
+    Public Method brlFactor_ForeignWithRate_UsesRate() as Logical
+
+    @Test('brlFactor: moeda estrangeira sem taxa não converte')
+    Public Method brlFactor_ForeignWithoutRate_IsOne() as Logical
+EndClass
+
+Method New() as Object Class test_tdash_com_rules
+Return Self
+
+Method brlFactor_Reais_IsOne() as Logical Class test_tdash_com_rules
+    tlpp.probat.assertEquals(tdash.com.u_brlFactor(1, 0), 1)
+    tlpp.probat.assertEquals(tdash.com.u_brlFactor(1, 5.1234), 1)
+Return .T.
+
+Method brlFactor_ForeignWithRate_UsesRate() as Logical Class test_tdash_com_rules
+    tlpp.probat.assertEquals(tdash.com.u_brlFactor(2, 5.45), 5.45)
+    tlpp.probat.assertEquals(1000 * tdash.com.u_brlFactor(2, 4.9), 4900)
+Return .T.
+
+Method brlFactor_ForeignWithoutRate_IsOne() as Logical Class test_tdash_com_rules
+    tlpp.probat.assertEquals(tdash.com.u_brlFactor(3, 0), 1)
+Return .T.

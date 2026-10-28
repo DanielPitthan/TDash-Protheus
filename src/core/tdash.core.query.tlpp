@@ -1,0 +1,155 @@
+#include 'tlpp-core.th'
+#include 'totvs.ch'
+
+namespace tdash.core
+
+/*/{Protheus.doc} TDashQuery
+Execução de consultas no padrão do cliente: FWPreparedStatement + SetQuery + GetFixQuery
++ MPSysOpenQuery. Todo valor vindo da requisição entra por bind (SetString/SetNumeric/
+SetDate/SetIn). O nome da tabela vem de RetSqlName() no próprio SQL.
+
+Exemplo:
+    cQry := " SELECT SE1.E1_SALDO SALDO "
+    cQry += " FROM " + RetSqlName("SE1") + " SE1 "
+    cQry += " WHERE SE1.E1_FILIAL = ? "
+    cQry += " AND SE1.D_E_L_E_T_ = ' ' "
+    oQuery := TDashQuery():new(cQry)
+    oQuery:setString(1, FWxFilial("SE1"))
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        ...
+        oQuery:close()
+    endIf
+@type class
+@author TDash
+@since 20/10/2026
+@version 1.0
+/*/
+class TDashQuery
+    private data oStatement as object
+    private data cAlias     as character
+    public  data cError     as character
+
+    public method new(cQry as character)
+    public method setString(nPos as numeric, cValue as character)
+    public method setNumeric(nPos as numeric, nValue as numeric)
+    public method setDate(nPos as numeric, dValue as date)
+    public method setIn(nPos as numeric, aValues as array)
+    public method open() as logical
+    public method getAlias() as character
+    public method close()
+endclass
+
+/*/{Protheus.doc} new
+Construtor. Aplica ChangeQuery e prepara o statement.
+@type method
+@author TDash
+@since 20/10/2026
+@param cQry, character, SQL com "?" nos pontos de bind
+/*/
+method new(cQry as character) class TDashQuery
+    ::oStatement := FWPreparedStatement():New()
+    ::oStatement:SetQuery(ChangeQuery(cQry))
+    ::cAlias := ""
+    ::cError := ""
+return self
+
+/*/{Protheus.doc} setString
+@type method
+@author TDash
+@since 20/10/2026
+@param nPos, numeric, posição do "?"
+@param cValue, character, valor
+/*/
+method setString(nPos as numeric, cValue as character) class TDashQuery
+    ::oStatement:SetString(nPos, cValue)
+return
+
+/*/{Protheus.doc} setNumeric
+@type method
+@author TDash
+@since 20/10/2026
+@param nPos, numeric, posição do "?"
+@param nValue, numeric, valor
+/*/
+method setNumeric(nPos as numeric, nValue as numeric) class TDashQuery
+    ::oStatement:SetNumeric(nPos, nValue)
+return
+
+/*/{Protheus.doc} setDate
+@type method
+@author TDash
+@since 20/10/2026
+@param nPos, numeric, posição do "?"
+@param dValue, date, valor
+/*/
+method setDate(nPos as numeric, dValue as date) class TDashQuery
+    ::oStatement:SetDate(nPos, dValue)
+return
+
+/*/{Protheus.doc} setIn
+@type method
+@author TDash
+@since 20/10/2026
+@param nPos, numeric, posição do "?"
+@param aValues, array, valores da cláusula IN
+/*/
+method setIn(nPos as numeric, aValues as array) class TDashQuery
+    ::oStatement:SetIn(nPos, aValues)
+return
+
+/*/{Protheus.doc} open
+Monta a query final (GetFixQuery) e abre com MPSysOpenQuery. Em erro, guarda a mensagem
+em ::cError e registra no log do AppServer (sem devolver o SQL ao cliente).
+@type method
+@author TDash
+@since 20/10/2026
+@return logical, .T. quando a consulta abriu
+/*/
+method open() as logical class TDashQuery
+    local lOk      := .T. as logical
+    local cQryStat := "" as character
+
+    TRY
+        ::cAlias := GetNextAlias()
+        cQryStat := ::oStatement:GetFixQuery()
+        MPSysOpenQuery(cQryStat, ::cAlias)
+    CATCH oError
+        lOk := .F.
+        ::cError := oError:description
+        FWLogMsg("ERROR", , "TDASH", "TDashQuery:open", , "01", ::cError, 0, 0, {})
+        ConOut("[TDASH] ERRO na consulta: " + ::cError)
+        ConOut("[TDASH] SQL: " + cQryStat)
+    ENDTRY
+
+    if lOk .and. Select(::cAlias) == 0
+        lOk := .F.
+        ::cError := "Consulta não retornou área de trabalho."
+    endIf
+return lOk
+
+/*/{Protheus.doc} getAlias
+@type method
+@author TDash
+@since 20/10/2026
+@return character, alias aberto pela consulta
+/*/
+method getAlias() as character class TDashQuery
+return ::cAlias
+
+/*/{Protheus.doc} close
+Fecha a área de trabalho e libera o statement.
+@type method
+@author TDash
+@since 20/10/2026
+/*/
+method close() class TDashQuery
+    if !Empty(::cAlias) .and. Select(::cAlias) > 0
+        (::cAlias)->(DbCloseArea())
+    endIf
+    ::cAlias := ""
+    if valType(::oStatement) == "O"
+        ::oStatement:Destroy()
+        FreeObj(::oStatement)
+    endIf
+return

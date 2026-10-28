@@ -1,0 +1,92 @@
+#include "tlpp-core.th"
+#include "tlpp-probat.th"
+
+namespace tests.core
+
+/*/{Protheus.doc} test_tdash_core_panel
+Testes PROBAT do montador de painel personalizado (TDashPanelBuilder), sem banco.
+Execução: appserver.exe -console -consolelog -run=tlpp.probat.run -env={AMBIENTE}
+@type class
+@author TDash
+@since 23/10/2026
+/*/
+@TestFixture()
+Class test_tdash_core_panel
+    Public Method New() as Object
+
+    @Test('panel: título, ttl e widgets na ordem em que foram adicionados')
+    Public Method panel_Widgets_KeepOrder() as Logical
+
+    @Test('panel: KPI com meta normaliza o sentido')
+    Public Method panel_KpiTarget_Direction() as Logical
+
+    @Test('panel: gráfico com categorias e séries')
+    Public Method panel_Chart_CategoriesAndSeries() as Logical
+
+    @Test('panel: tabela com colunas rótulo/unidade e linhas')
+    Public Method panel_Table_Columns() as Logical
+EndClass
+
+Method New() as Object Class test_tdash_core_panel
+Return Self
+
+Method panel_Widgets_KeepOrder() as Logical Class test_tdash_core_panel
+    Local oPanel := tdash.core.TDashPanelBuilder():new("Teste", 120) as Object
+    Local jBody  as Json
+    Local jKpi   as Json
+
+    oPanel:addKpi("A", 1, "COUNT")
+    oPanel:addTable("B", { { "Col", "" } }, { { "x" } })
+    oPanel:addBarChart("C", "", "", "BRL", { "Jan" }, { { "S", { 1 } } })
+    jBody := oPanel:getJson()
+
+    tlpp.probat.assertEquals(jBody["title"], "Teste")
+    tlpp.probat.assertEquals(jBody["ttl"], 120)
+    tlpp.probat.assertEquals(oPanel:widgetCount(), 3)
+    tlpp.probat.assertEquals(jBody["widgets"][1]["type"], "kpi")
+    tlpp.probat.assertEquals(jBody["widgets"][2]["type"], "table")
+    tlpp.probat.assertEquals(jBody["widgets"][3]["type"], "barChart")
+    jKpi := jBody["widgets"][1]
+    tlpp.probat.assertEquals(jKpi:hasProperty("target"), .F.)
+Return .T.
+
+Method panel_KpiTarget_Direction() as Logical Class test_tdash_core_panel
+    Local oPanel := tdash.core.TDashPanelBuilder():new("", 0) as Object
+    Local jBody  as Json
+
+    oPanel:addKpiTarget("Meta", 80, 100, "PCT", " DOWN_IS_GOOD ")
+    oPanel:addKpiTarget("Outra", 1, 2, "", "qualquer")
+    jBody := oPanel:getJson()
+
+    tlpp.probat.assertEquals(jBody["widgets"][1]["target"], 100)
+    tlpp.probat.assertEquals(jBody["widgets"][1]["direction"], "down_is_good")
+    tlpp.probat.assertEquals(jBody["widgets"][2]["direction"], "up_is_good")
+Return .T.
+
+Method panel_Chart_CategoriesAndSeries() as Logical Class test_tdash_core_panel
+    Local oPanel := tdash.core.TDashPanelBuilder():new("", 0) as Object
+    Local jChart as Json
+
+    oPanel:addColumnChart("Por mês", "Mês", "R$", "BRL", { "Jan", "Fev" }, { { "Faturado", { 10, 20 } }, { "Devolvido", { 1, 2 } } })
+    jChart := oPanel:getJson()["widgets"][1]
+
+    tlpp.probat.assertEquals(jChart["type"], "columnChart")
+    tlpp.probat.assertEquals(jChart["axisX"], "Mês")
+    tlpp.probat.assertEquals(Len(jChart["categories"]), 2)
+    tlpp.probat.assertEquals(Len(jChart["series"]), 2)
+    tlpp.probat.assertEquals(jChart["series"][2]["name"], "Devolvido")
+    tlpp.probat.assertEquals(jChart["series"][1]["data"][2], 20)
+Return .T.
+
+Method panel_Table_Columns() as Logical Class test_tdash_core_panel
+    Local oPanel := tdash.core.TDashPanelBuilder():new("", 0) as Object
+    Local jTable as Json
+
+    oPanel:addTable("Clientes", { { "Cliente", "" }, { "Valor", "BRL" } }, { { "ACME", 10.5 }, { "BETA", 3 } })
+    jTable := oPanel:getJson()["widgets"][1]
+
+    tlpp.probat.assertEquals(jTable["columns"][2]["label"], "Valor")
+    tlpp.probat.assertEquals(jTable["columns"][2]["unit"], "BRL")
+    tlpp.probat.assertEquals(Len(jTable["data"]), 2)
+    tlpp.probat.assertEquals(jTable["data"][1][2], 10.5)
+Return .T.

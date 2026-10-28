@@ -1,0 +1,98 @@
+#include 'tlpp-core.th'
+#include 'tlpp-rest.th'
+#include 'totvs.ch'
+
+#define TTL_EXEMPLO 1800
+#define TOP_CLIENTES 5
+
+/*/{Protheus.doc} TDashCustomExemploApi
+Painel personalizado de exemplo com dados REAIS do Faturamento, reaproveitando as consultas que já existem em
+tdash.fat.TDashFatRepository (mesmas regras do painel de Faturamento; nenhuma regra nova).
+Comece pelo exemplo com dados fictícios (tdash.custom.mock.tlpp) e use este para ver como ligar o painel às
+suas consultas. Contrato do JSON: docs/09-painel-personalizado.md.
+
+No app: caminho /tdash/v1/custom/exemplo, módulo Faturamento, "Usa período" ligado.
+@type class
+@author TDash
+@since 23/10/2026
+@version 1.0
+/*/
+namespace tdash.custom
+
+class TDashCustomExemploApi
+    public method new()
+
+    @Get("/tdash/v1/custom/exemplo")
+    public method getPanel()
+endclass
+
+method new() class TDashCustomExemploApi
+return self
+
+/*/{Protheus.doc} getPanel
+GET /tdash/v1/custom/exemplo?dateFrom=AAAAMMDD&dateTo=AAAAMMDD
+Faturado contra a meta, devoluções, faturado x devolvido por mês e maiores clientes do período.
+@type method
+@author TDash
+@since 23/10/2026
+@return logical, sempre .T.
+/*/
+method getPanel() class TDashCustomExemploApi
+    local oRequest   := tdash.core.TDashRequest():new() as object
+    local oHelper    := tdash.core.TDashResponseHelper():new() as object
+    local oPeriod    := tdash.core.TDashPeriod():new() as object
+    local oRepo      := tdash.fat.TDashFatRepository():new() as object
+    local oPanel     as object
+    local aRevenue   := {} as array
+    local aReturns   := {} as array
+    local aKeys      := {} as array
+    local aRevenueV  := {} as array
+    local aReturnsV  := {} as array
+    local aCustomers := {} as array
+    local aRows      := {} as array
+    local nRevenue   := 0 as numeric
+    local nTarget    := 0 as numeric
+    local nX         := 0 as numeric
+
+    if !oPeriod:fromQuery(oRequest:query("dateFrom"), oRequest:query("dateTo"), "none", Date())
+        oHelper:badRequest(oPeriod:cError)
+        return .T.
+    endIf
+
+    TRY
+        oPanel := tdash.core.TDashPanelBuilder():new("Faturamento · " + DToC(oPeriod:dFrom) + " a " + DToC(oPeriod:dTo), TTL_EXEMPLO)
+
+        // KPIs: faturado contra a meta (SCT) quando há meta; devoluções sem meta
+        nRevenue := oRepo:revenue(oPeriod:dFrom, oPeriod:dTo)
+        nTarget  := oRepo:target(oPeriod:dFrom, oPeriod:dTo)
+        if nTarget > 0
+            oPanel:addKpiTarget("Faturado", nRevenue, nTarget, "BRL", "up_is_good")
+        else
+            oPanel:addKpi("Faturado", nRevenue, "BRL")
+        endIf
+        oPanel:addKpi("Devoluções", oRepo:returns(oPeriod:dFrom, oPeriod:dTo), "BRL")
+
+        // Colunas por mês (AAAA-MM), com as mesmas funções de série do núcleo
+        aRevenue := tdash.core.u_groupRows(oRepo:revenueByDay(oPeriod:dFrom, oPeriod:dTo), "month")
+        aReturns := tdash.core.u_groupRows(oRepo:returnsByDay(oPeriod:dFrom, oPeriod:dTo), "month")
+        aKeys    := tdash.core.u_mergeKeys(aRevenue, aReturns)
+        for nX := 1 to Len(aKeys)
+            aAdd(aRevenueV, tdash.core.u_valueOf(aRevenue, aKeys[nX]))
+            aAdd(aReturnsV, tdash.core.u_valueOf(aReturns, aKeys[nX]))
+        next nX
+        oPanel:addColumnChart("Faturado x devolvido por mês", "Mês", "R$", "BRL", aKeys,;
+            { { "Faturado", aRevenueV }, { "Devolvido", aReturnsV } })
+
+        // Tabela: maiores clientes ({ chave, rótulo, valor })
+        aCustomers := oRepo:revenueBy("customer", oPeriod:dFrom, oPeriod:dTo, TOP_CLIENTES)
+        for nX := 1 to Len(aCustomers)
+            aAdd(aRows, { aCustomers[nX][2], aCustomers[nX][3] })
+        next nX
+        oPanel:addTable("Maiores clientes", { { "Cliente", "" }, { "Faturado", "BRL" } }, aRows)
+
+        oHelper:setCacheHeaders(TTL_EXEMPLO)
+        oRest:setResponse(oHelper:getResponse(oPanel:getJson()))
+    CATCH oError
+        oHelper:serverError("TDashCustomExemploApi:getPanel", oError:description)
+    ENDTRY
+return .T.

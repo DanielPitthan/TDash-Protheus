@@ -1,0 +1,731 @@
+#include 'tlpp-core.th'
+#include 'totvs.ch'
+
+namespace tdash.fin
+
+// Faixas de atraso do aging (dias)
+#define AGING_LIMITS { 30, 60, 90, 180 }
+
+/*/{Protheus.doc} TDashFinRepository
+Consultas dos indicadores do Financeiro (SE1, SE2, SE5, SE8, SA6).
+Regras de cada indicador: docs/10-catalogo-de-indicadores.md (seção Financeiro).
+Todas as consultas usam TDashQuery (FWPreparedStatement + MPSysOpenQuery) com bind;
+o texto do SQL só recebe nomes fixos de tabela/campo, nunca valor vindo da requisição.
+@type class
+@author TDash
+@since 20/10/2026
+@version 1.0
+/*/
+class TDashFinRepository
+    public method new()
+
+    // Saldos de títulos (cSide: "R" = receber/SE1, "P" = pagar/SE2)
+    public method titleBalance(cSide as character, cScope as character, dToday as date, nDays as numeric) as numeric
+    public method aging(cSide as character, dToday as date) as array
+    public method projection(cSide as character, dFrom as date, dTo as date) as array
+    public method averageTerm(cSide as character, dFrom as date, dTo as date) as numeric
+    public method topParties(cSide as character, dToday as date, nDays as numeric, nTop as numeric) as array
+    public method overdueTitles(cSide as character, dToday as date, nPage as numeric, nPageSize as numeric) as json
+
+    // Bancos e movimento bancário
+    public method bankBalances(dDate as date) as array
+    public method cashMovements(dFrom as date, dTo as date) as array
+    public method cashByBank(dFrom as date, dTo as date) as array
+
+    // Também usados pela posição de cliente e fornecedor (TDashFinPartyRepository)
+    public method excludedTypes(cSide as character) as array
+    public method motivesWithoutBank() as array
+    public method cashWhere() as character
+
+    private method numberOf(cAlias as character, cField as character) as numeric
+    private method sideInfo(cSide as character) as json
+    private method publicList(cName as character, cDefault as character) as array
+endclass
+
+/*/{Protheus.doc} new
+Construtor.
+@type method
+@author TDash
+@since 20/10/2026
+/*/
+method new() class TDashFinRepository
+return self
+
+/*/{Protheus.doc} titleBalance
+Soma de saldo de títulos em aberto.
+cScope: "open" (todo o saldo), "overdue" (vencimento real antes de hoje),
+"due" (vencimento entre hoje e hoje + nDays), "late" (vencido há mais de nDays dias).
+@type method
+@author TDash
+@since 20/10/2026
+@param cSide, character, "R" receber ou "P" pagar
+@param cScope, character, open | overdue | due | late
+@param dToday, date, data de referência
+@param nDays, numeric, janela em dias (due/late)
+@return numeric, saldo
+/*/
+method titleBalance(cSide as character, cScope as character, dToday as date, nDays as numeric) as numeric class TDashFinRepository
+    local jSide  := ::sideInfo(cSide) as json
+    local cP     := jSide["prefix"] as character
+    local cQry   := "" as character
+    local nTotal := 0 as numeric
+    local oQuery as object
+
+    cQry := " SELECT SUM(T." + cP + "SALDO) TOTAL "
+    cQry += " FROM " + RetSqlName(jSide["table"]) + " T "
+    cQry += " WHERE T." + cP + "FILIAL = ? "
+    cQry += " AND T." + cP + "SALDO >= 0.01 "
+    cQry += " AND T." + cP + "TIPO NOT IN (?) "
+    cQry += " AND T.D_E_L_E_T_ = ' ' "
+    if cScope == "overdue" .or. cScope == "late"
+        cQry += " AND T." + cP + "VENCREA < ? AND T." + cP + "VENCREA <> ' ' "
+    elseIf cScope == "due"
+        cQry += " AND T." + cP + "VENCREA BETWEEN ? AND ? "
+    endIf
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    oQuery:setString(1, FWxFilial(jSide["table"]))
+    oQuery:setIn(2, ::excludedTypes(cSide))
+    if cScope == "overdue"
+        oQuery:setString(3, DToS(dToday))
+    elseIf cScope == "late"
+        oQuery:setString(3, DToS(dToday - nDays))
+    elseIf cScope == "due"
+        oQuery:setString(3, DToS(dToday))
+        oQuery:setString(4, DToS(dToday + nDays))
+    endIf
+
+    if oQuery:open()
+        nTotal := ::numberOf(oQuery:getAlias(), "TOTAL")
+        oQuery:close()
+    endIf
+return Round(nTotal, 2)
+
+/*/{Protheus.doc} aging
+Saldo vencido por faixa de atraso (1-30, 31-60, 61-90, 91-180, acima de 180 dias).
+@type method
+@author TDash
+@since 20/10/2026
+@param cSide, character, "R" ou "P"
+@param dToday, date, data de referência
+@return array, { { chave, rótulo, valor }, ... }
+/*/
+method aging(cSide as character, dToday as date) as array class TDashFinRepository
+    local jSide    := ::sideInfo(cSide) as json
+    local cP       := jSide["prefix"] as character
+    local aLimits  := AGING_LIMITS as array
+    local aBuckets := {} as array
+    local cQry     := "" as character
+    local cAlias   := "" as character
+    local nDays    := 0 as numeric
+    local nPos     := 0 as numeric
+    local oQuery as object
+
+    aBuckets := {;
+        { "1-30",    "Até 30 dias",      0 },;
+        { "31-60",   "31 a 60 dias",     0 },;
+        { "61-90",   "61 a 90 dias",     0 },;
+        { "91-180",  "91 a 180 dias",    0 },;
+        { "180+",    "Acima de 180 dias", 0 } }
+
+    cQry := " SELECT T." + cP + "VENCREA VENC, SUM(T." + cP + "SALDO) SALDO "
+    cQry += " FROM " + RetSqlName(jSide["table"]) + " T "
+    cQry += " WHERE T." + cP + "FILIAL = ? "
+    cQry += " AND T." + cP + "SALDO >= 0.01 "
+    cQry += " AND T." + cP + "TIPO NOT IN (?) "
+    cQry += " AND T." + cP + "VENCREA < ? AND T." + cP + "VENCREA <> ' ' "
+    cQry += " AND T.D_E_L_E_T_ = ' ' "
+    cQry += " GROUP BY T." + cP + "VENCREA "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    oQuery:setString(1, FWxFilial(jSide["table"]))
+    oQuery:setIn(2, ::excludedTypes(cSide))
+    oQuery:setString(3, DToS(dToday))
+
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof())
+            nDays := tdash.core.u_daysBetween(SToD((cAlias)->VENC), dToday)
+            nPos  := AScan(aLimits, {|n| nDays <= n})
+            if nPos == 0
+                nPos := Len(aBuckets)
+            endIf
+            aBuckets[nPos][3] += (cAlias)->SALDO
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+return aBuckets
+
+/*/{Protheus.doc} projection
+Saldo a vencer por data de vencimento real no intervalo.
+@type method
+@author TDash
+@since 20/10/2026
+@param cSide, character, "R" ou "P"
+@param dFrom, date, início
+@param dTo, date, fim
+@return array, { { data AAAAMMDD, valor }, ... } ordenado por data
+/*/
+method projection(cSide as character, dFrom as date, dTo as date) as array class TDashFinRepository
+    local jSide  := ::sideInfo(cSide) as json
+    local cP     := jSide["prefix"] as character
+    local aRows  := {} as array
+    local cQry   := "" as character
+    local cAlias := "" as character
+    local oQuery as object
+
+    cQry := " SELECT T." + cP + "VENCREA VENC, SUM(T." + cP + "SALDO) SALDO "
+    cQry += " FROM " + RetSqlName(jSide["table"]) + " T "
+    cQry += " WHERE T." + cP + "FILIAL = ? "
+    cQry += " AND T." + cP + "SALDO >= 0.01 "
+    cQry += " AND T." + cP + "TIPO NOT IN (?) "
+    cQry += " AND T." + cP + "VENCREA BETWEEN ? AND ? "
+    cQry += " AND T.D_E_L_E_T_ = ' ' "
+    cQry += " GROUP BY T." + cP + "VENCREA "
+    cQry += " ORDER BY T." + cP + "VENCREA "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    oQuery:setString(1, FWxFilial(jSide["table"]))
+    oQuery:setIn(2, ::excludedTypes(cSide))
+    oQuery:setString(3, DToS(dFrom))
+    oQuery:setString(4, DToS(dTo))
+
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof())
+            aAdd(aRows, { (cAlias)->VENC, (cAlias)->SALDO })
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+return aRows
+
+/*/{Protheus.doc} averageTerm
+Prazo médio (PMR para receber, PMP para pagar) dos títulos baixados no período:
+média de (baixa - emissão) ponderada pelo valor do título.
+@type method
+@author TDash
+@since 20/10/2026
+@param cSide, character, "R" ou "P"
+@param dFrom, date, início do período de baixa
+@param dTo, date, fim do período de baixa
+@return numeric, dias (0 quando não há baixas)
+/*/
+method averageTerm(cSide as character, dFrom as date, dTo as date) as numeric class TDashFinRepository
+    local jSide   := ::sideInfo(cSide) as json
+    local cP      := jSide["prefix"] as character
+    local cQry    := "" as character
+    local cAlias  := "" as character
+    local nWeight := 0 as numeric
+    local nValue  := 0 as numeric
+    local nDays   := 0 as numeric
+    local oQuery as object
+
+    cQry := " SELECT T." + cP + "EMISSAO EMIS, T." + cP + "BAIXA BAIXA, SUM(T." + cP + "VALOR) VALOR "
+    cQry += " FROM " + RetSqlName(jSide["table"]) + " T "
+    cQry += " WHERE T." + cP + "FILIAL = ? "
+    cQry += " AND T." + cP + "SALDO = 0 "
+    cQry += " AND T." + cP + "TIPO NOT IN (?) "
+    cQry += " AND T." + cP + "BAIXA BETWEEN ? AND ? "
+    cQry += " AND T.D_E_L_E_T_ = ' ' "
+    cQry += " GROUP BY T." + cP + "EMISSAO, T." + cP + "BAIXA "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    oQuery:setString(1, FWxFilial(jSide["table"]))
+    oQuery:setIn(2, ::excludedTypes(cSide))
+    oQuery:setString(3, DToS(dFrom))
+    oQuery:setString(4, DToS(dTo))
+
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof())
+            nWeight += tdash.core.u_daysBetween(SToD((cAlias)->EMIS), SToD((cAlias)->BAIXA)) * (cAlias)->VALOR
+            nValue  += (cAlias)->VALOR
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+
+    if nValue > 0
+        nDays := Round(nWeight / nValue, 1)
+    endIf
+return nDays
+
+/*/{Protheus.doc} topParties
+Maiores clientes (saldo vencido) ou fornecedores (saldo a vencer em nDays dias).
+@type method
+@author TDash
+@since 20/10/2026
+@param cSide, character, "R" (devedores) ou "P" (credores)
+@param dToday, date, data de referência
+@param nDays, numeric, janela a vencer (só para "P")
+@param nTop, numeric, quantidade
+@return array, { { chave, nome, valor }, ... }
+/*/
+method topParties(cSide as character, dToday as date, nDays as numeric, nTop as numeric) as array class TDashFinRepository
+    local jSide  := ::sideInfo(cSide) as json
+    local cP     := jSide["prefix"] as character
+    local aRows  := {} as array
+    local cQry   := "" as character
+    local cAlias := "" as character
+    local oQuery as object
+
+    cQry := " SELECT T." + cP + jSide["party"] + " CODIGO, T." + cP + "LOJA LOJA, "
+    cQry += " MAX(T." + cP + jSide["partyName"] + ") NOME, SUM(T." + cP + "SALDO) SALDO "
+    cQry += " FROM " + RetSqlName(jSide["table"]) + " T "
+    cQry += " WHERE T." + cP + "FILIAL = ? "
+    cQry += " AND T." + cP + "SALDO >= 0.01 "
+    cQry += " AND T." + cP + "TIPO NOT IN (?) "
+    if cSide == "R"
+        cQry += " AND T." + cP + "VENCREA < ? AND T." + cP + "VENCREA <> ' ' "
+    else
+        cQry += " AND T." + cP + "VENCREA BETWEEN ? AND ? "
+    endIf
+    cQry += " AND T.D_E_L_E_T_ = ' ' "
+    cQry += " GROUP BY T." + cP + jSide["party"] + ", T." + cP + "LOJA "
+    cQry += " ORDER BY SUM(T." + cP + "SALDO) DESC "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    oQuery:setString(1, FWxFilial(jSide["table"]))
+    oQuery:setIn(2, ::excludedTypes(cSide))
+    oQuery:setString(3, DToS(dToday))
+    if cSide <> "R"
+        oQuery:setString(4, DToS(dToday + nDays))
+    endIf
+
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof()) .and. Len(aRows) < nTop
+            aAdd(aRows, { AllTrim((cAlias)->CODIGO) + "-" + AllTrim((cAlias)->LOJA), AllTrim((cAlias)->NOME), (cAlias)->SALDO })
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+return aRows
+
+/*/{Protheus.doc} overdueTitles
+Títulos vencidos, do mais atrasado para o mais recente, paginados.
+@type method
+@author TDash
+@since 20/10/2026
+@param cSide, character, "R" ou "P"
+@param dToday, date, data de referência
+@param nPage, numeric, página (a partir de 1)
+@param nPageSize, numeric, itens por página
+@return json, { items, hasNext, total }
+/*/
+method overdueTitles(cSide as character, dToday as date, nPage as numeric, nPageSize as numeric) as json class TDashFinRepository
+    local jSide   := ::sideInfo(cSide) as json
+    local cP      := jSide["prefix"] as character
+    local jResult := jsonObject():new() as json
+    local jItem   as json
+    local aItems  := {} as array
+    local cFrom   := "" as character
+    local cQry    := "" as character
+    local cAlias  := "" as character
+    local nTotal  := 0 as numeric
+    local oQuery  as object
+
+    cFrom := " FROM " + RetSqlName(jSide["table"]) + " T "
+    cFrom += " WHERE T." + cP + "FILIAL = ? "
+    cFrom += " AND T." + cP + "SALDO >= 0.01 "
+    cFrom += " AND T." + cP + "TIPO NOT IN (?) "
+    cFrom += " AND T." + cP + "VENCREA < ? AND T." + cP + "VENCREA <> ' ' "
+    cFrom += " AND T.D_E_L_E_T_ = ' ' "
+
+    // Total de registros
+    oQuery := tdash.core.TDashQuery():new(" SELECT COUNT(*) TOTAL " + cFrom)
+    oQuery:setString(1, FWxFilial(jSide["table"]))
+    oQuery:setIn(2, ::excludedTypes(cSide))
+    oQuery:setString(3, DToS(dToday))
+    if oQuery:open()
+        nTotal := ::numberOf(oQuery:getAlias(), "TOTAL")
+        oQuery:close()
+    endIf
+
+    // Página pedida
+    cQry := " SELECT T." + cP + "PREFIXO PREFIXO, T." + cP + "NUM NUM, T." + cP + "PARCELA PARCELA, "
+    cQry += " T." + cP + "TIPO TIPO, T." + cP + jSide["partyName"] + " NOME, "
+    cQry += " T." + cP + "VENCREA VENC, T." + cP + "SALDO SALDO "
+    cQry += cFrom
+    cQry += " ORDER BY T." + cP + "VENCREA, T." + cP + "PREFIXO, T." + cP + "NUM, T." + cP + "PARCELA "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    oQuery:setString(1, FWxFilial(jSide["table"]))
+    oQuery:setIn(2, ::excludedTypes(cSide))
+    oQuery:setString(3, DToS(dToday))
+
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        (cAlias)->(DbSkip((nPage - 1) * nPageSize))
+        while !(cAlias)->(Eof()) .and. Len(aItems) < nPageSize
+            jItem := jsonObject():new()
+            jItem["document"] := AllTrim((cAlias)->PREFIXO) + " " + AllTrim((cAlias)->NUM) + " " + AllTrim((cAlias)->PARCELA) + " " + AllTrim((cAlias)->TIPO)
+            jItem["party"]    := AllTrim((cAlias)->NOME)
+            jItem["dueDate"]  := Transform((cAlias)->VENC, "@R 9999-99-99")
+            jItem["daysLate"] := tdash.core.u_daysBetween(SToD((cAlias)->VENC), dToday)
+            jItem["balance"]  := Round((cAlias)->SALDO, 2)
+            aAdd(aItems, jItem)
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+
+    jResult["items"]   := aItems
+    jResult["total"]   := nTotal
+    jResult["hasNext"] := (nPage * nPageSize) < nTotal
+return jResult
+
+/*/{Protheus.doc} bankBalances
+Último saldo (SE8) de cada conta até a data. Só contas não bloqueadas, que participam do fluxo de
+caixa (A6_FLUXCAI <> 'N') e em moeda 1 (A6_MOEDA), já que a v1 não converte moeda.
+@type method
+@author TDash
+@since 20/10/2026
+@param dDate, date, data de referência
+@return array, { { chave banco/agência/conta, nome do banco, saldo }, ... }
+/*/
+method bankBalances(dDate as date) as array class TDashFinRepository
+    local aRows  := {} as array
+    local cQry   := "" as character
+    local cAlias := "" as character
+    local oQuery as object
+
+    cQry := " SELECT E8.E8_BANCO BANCO, E8.E8_AGENCIA AGENCIA, E8.E8_CONTA CONTA, "
+    cQry += " E8.E8_SALATUA SALDO, A6.A6_NOME NOME, A6.A6_NREDUZ NREDUZ "
+    cQry += " FROM " + RetSqlName("SE8") + " E8 "
+    cQry += " INNER JOIN " + RetSqlName("SA6") + " A6 "
+    cQry += "   ON A6.A6_FILIAL = ? "
+    cQry += "  AND A6.A6_COD = E8.E8_BANCO "
+    cQry += "  AND A6.A6_AGENCIA = E8.E8_AGENCIA "
+    cQry += "  AND A6.A6_NUMCON = E8.E8_CONTA "
+    cQry += "  AND A6.A6_BLOCKED <> '1' "
+    cQry += "  AND A6.A6_FLUXCAI <> 'N' "
+    cQry += "  AND A6.A6_MOEDA <= 1 "
+    cQry += "  AND A6.D_E_L_E_T_ = ' ' "
+    cQry += " WHERE E8.E8_FILIAL = ? "
+    cQry += " AND E8.D_E_L_E_T_ = ' ' "
+    cQry += " AND E8.E8_DTSALAT = ( SELECT MAX(X.E8_DTSALAT) "
+    cQry += "                         FROM " + RetSqlName("SE8") + " X "
+    cQry += "                        WHERE X.E8_FILIAL = E8.E8_FILIAL "
+    cQry += "                          AND X.E8_BANCO = E8.E8_BANCO "
+    cQry += "                          AND X.E8_AGENCIA = E8.E8_AGENCIA "
+    cQry += "                          AND X.E8_CONTA = E8.E8_CONTA "
+    cQry += "                          AND X.E8_DTSALAT <= ? "
+    cQry += "                          AND X.D_E_L_E_T_ = ' ' ) "
+    cQry += " ORDER BY E8.E8_SALATUA DESC "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    oQuery:setString(1, FWxFilial("SA6"))
+    oQuery:setString(2, FWxFilial("SE8"))
+    oQuery:setString(3, DToS(dDate))
+
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof())
+            aAdd(aRows, {;
+                AllTrim((cAlias)->BANCO) + "/" + AllTrim((cAlias)->AGENCIA) + "/" + AllTrim((cAlias)->CONTA),;
+                bankName((cAlias)->NOME, (cAlias)->NREDUZ),;
+                (cAlias)->SALDO })
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+return aRows
+
+/*/{Protheus.doc} cashMovements
+Movimento bancário realizado por dia de disponibilidade, com os filtros do relatório padrão
+FINR620 (ver cashWhere).
+@type method
+@author TDash
+@since 20/10/2026
+@param dFrom, date, início (E5_DTDISPO)
+@param dTo, date, fim (E5_DTDISPO)
+@return array, { { data AAAAMMDD, entradas, saídas }, ... } ordenado por data
+/*/
+method cashMovements(dFrom as date, dTo as date) as array class TDashFinRepository
+    local aRows    := {} as array
+    local aMotives := ::motivesWithoutBank() as array
+    local cQry     := "" as character
+    local cAlias   := "" as character
+    local nPos     := 0 as numeric
+    local oQuery   as object
+
+    cQry := " SELECT E5.E5_DTDISPO DIA, E5.E5_RECPAG RECPAG, SUM(E5.E5_VALOR) VALOR "
+    cQry += " FROM " + RetSqlName("SE5") + " E5 "
+    cQry += ::cashWhere()
+    if Len(aMotives) > 0
+        cQry += " AND ( E5.E5_MOTBX = ' ' OR E5.E5_MOTBX NOT IN (?) ) "
+    endIf
+    cQry += " GROUP BY E5.E5_DTDISPO, E5.E5_RECPAG "
+    cQry += " ORDER BY E5.E5_DTDISPO "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    oQuery:setString(1, FWxFilial("SE5"))
+    oQuery:setString(2, DToS(dFrom))
+    oQuery:setString(3, DToS(dTo))
+    if Len(aMotives) > 0
+        oQuery:setIn(4, aMotives)
+    endIf
+
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof())
+            nPos := AScan(aRows, {|x| x[1] == (cAlias)->DIA})
+            if nPos == 0
+                aAdd(aRows, { (cAlias)->DIA, 0, 0 })
+                nPos := Len(aRows)
+            endIf
+            if (cAlias)->RECPAG == "R"
+                aRows[nPos][2] += (cAlias)->VALOR
+            else
+                aRows[nPos][3] += (cAlias)->VALOR
+            endIf
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+return aRows
+
+/*/{Protheus.doc} cashByBank
+Entradas e saídas realizadas por banco/agência/conta (mesmos filtros de cashMovements).
+@type method
+@author TDash
+@since 20/10/2026
+@param dFrom, date, início
+@param dTo, date, fim
+@return array, { { chave, entradas, saídas }, ... }
+/*/
+method cashByBank(dFrom as date, dTo as date) as array class TDashFinRepository
+    local aRows    := {} as array
+    local aMotives := ::motivesWithoutBank() as array
+    local cQry     := "" as character
+    local cAlias   := "" as character
+    local cKey     := "" as character
+    local nPos     := 0 as numeric
+    local oQuery   as object
+
+    cQry := " SELECT E5.E5_BANCO BANCO, E5.E5_AGENCIA AGENCIA, E5.E5_CONTA CONTA, "
+    cQry += " E5.E5_RECPAG RECPAG, SUM(E5.E5_VALOR) VALOR "
+    cQry += " FROM " + RetSqlName("SE5") + " E5 "
+    cQry += ::cashWhere()
+    if Len(aMotives) > 0
+        cQry += " AND ( E5.E5_MOTBX = ' ' OR E5.E5_MOTBX NOT IN (?) ) "
+    endIf
+    cQry += " GROUP BY E5.E5_BANCO, E5.E5_AGENCIA, E5.E5_CONTA, E5.E5_RECPAG "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    oQuery:setString(1, FWxFilial("SE5"))
+    oQuery:setString(2, DToS(dFrom))
+    oQuery:setString(3, DToS(dTo))
+    if Len(aMotives) > 0
+        oQuery:setIn(4, aMotives)
+    endIf
+
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof())
+            cKey := AllTrim((cAlias)->BANCO) + "/" + AllTrim((cAlias)->AGENCIA) + "/" + AllTrim((cAlias)->CONTA)
+            nPos := AScan(aRows, {|x| x[1] == cKey})
+            if nPos == 0
+                aAdd(aRows, { cKey, 0, 0 })
+                nPos := Len(aRows)
+            endIf
+            if (cAlias)->RECPAG == "R"
+                aRows[nPos][2] += (cAlias)->VALOR
+            else
+                aRows[nPos][3] += (cAlias)->VALOR
+            endIf
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+return aRows
+
+/*/{Protheus.doc} cashWhere
+Filtros do movimento bancário iguais ao relatório padrão FINR620 (linhas 604-616 e 797-892):
+banco informado, não cancelado, data de disponibilidade no período, não pré-datado,
+sem documentos de juros/multa/desconto/baixa/correção, sem cheque cancelado e as regras
+de numerário/transferência/SG. Binds: 1 filial, 2 data inicial, 3 data final.
+@type method
+@author TDash
+@since 20/10/2026
+@return character, cláusula WHERE
+/*/
+method cashWhere() as character class TDashFinRepository
+    local cWhere := "" as character
+
+    cWhere := " WHERE E5.E5_FILIAL = ? "
+    cWhere += " AND E5.D_E_L_E_T_ = ' ' "
+    cWhere += " AND E5.E5_BANCO <> ' ' "
+    cWhere += " AND E5.E5_SITUACA <> 'C' "
+    cWhere += " AND E5.E5_DTDISPO BETWEEN ? AND ? "
+    cWhere += " AND ( E5.E5_VENCTO <= E5.E5_DATA OR E5.E5_ORIGEM = 'FINA087A' ) "
+    cWhere += " AND E5.E5_TIPODOC NOT IN ('DC','JR','MT','BA','CM','D2','J2','M2','C2','V2','CX','CP','TL') "
+    cWhere += " AND E5.E5_NUMCHEQ NOT LIKE '*%' "
+    cWhere += " AND NOT ( E5.E5_MOEDA IN ('C1','C2','C3','C4','C5','CH') "
+    cWhere += "           AND E5.E5_NUMCHEQ = ' ' "
+    cWhere += "           AND E5.E5_TIPODOC NOT IN ('TR','TE') ) "
+    cWhere += " AND NOT ( E5.E5_TIPODOC IN ('TR','TE') "
+    cWhere += "           AND E5.E5_NUMERO = ' ' "
+    cWhere += "           AND E5.E5_MOEDA NOT IN ('R$','DO','TB','TC','CH') ) "
+    cWhere += " AND NOT ( E5.E5_TIPODOC IN ('TR','TE') AND E5.E5_DOCUMEN LIKE '*%' ) "
+    cWhere += " AND NOT ( E5.E5_TIPODOC = 'SG' AND E5.E5_MOEDA <> 'R$' ) "
+return cWhere
+
+/*/{Protheus.doc} numberOf
+Valor numérico de um campo da linha atual; 0 quando nulo (ex.: SUM sem linhas).
+@type method
+@author TDash
+@since 20/10/2026
+@param cAlias, character, alias aberto
+@param cField, character, nome do campo
+@return numeric, valor ou 0
+/*/
+method numberOf(cAlias as character, cField as character) as numeric class TDashFinRepository
+    local nValue := 0 as numeric
+    local xValue
+
+    if !(cAlias)->(Eof())
+        xValue := (cAlias)->(FieldGet(FieldPos(cField)))
+        if valType(xValue) == "N"
+            nValue := xValue
+        endIf
+    endIf
+return nValue
+
+/*/{Protheus.doc} sideInfo
+Tabela e campos de cada lado (receber/pagar).
+@type method
+@author TDash
+@since 20/10/2026
+@param cSide, character, "R" ou "P"
+@return json, { table, prefix, party, partyName }
+/*/
+method sideInfo(cSide as character) as json class TDashFinRepository
+    local jSide := jsonObject():new() as json
+
+    if cSide == "R"
+        jSide["table"]     := "SE1"
+        jSide["prefix"]    := "E1_"
+        jSide["party"]     := "CLIENTE"
+        jSide["partyName"] := "NOMCLI"
+    else
+        jSide["table"]     := "SE2"
+        jSide["prefix"]    := "E2_"
+        jSide["party"]     := "FORNECE"
+        jSide["partyName"] := "NOMFOR"
+    endIf
+return jSide
+
+/*/{Protheus.doc} excludedTypes
+Tipos de título que não são dívida real: abatimentos (MVABATIM), provisórios (MVPROVIS),
+adiantamentos (MVRECANT / MVPAGANT) e créditos (MV_CRNEG / MV_CPNEG). Lidos das variáveis
+do Financeiro; sem elas, usa os padrões do próprio framework.
+@type method
+@author TDash
+@since 20/10/2026
+@param cSide, character, "R" ou "P"
+@return array, tipos (3 caracteres)
+/*/
+method excludedTypes(cSide as character) as array class TDashFinRepository
+    local aTypes := {} as array
+    local aParts := {} as array
+    local nX     := 0 as numeric
+
+    aParts := ::publicList("MVABATIM", "AB-|FB-|FC-|FU-")
+    for nX := 1 to Len(aParts)
+        aAdd(aTypes, aParts[nX])
+    next nX
+
+    aParts := ::publicList("MVPROVIS", "PR")
+    for nX := 1 to Len(aParts)
+        aAdd(aTypes, aParts[nX])
+    next nX
+
+    if cSide == "R"
+        aParts := ::publicList("MVRECANT", "RA")
+        for nX := 1 to Len(aParts)
+            aAdd(aTypes, aParts[nX])
+        next nX
+        aParts := ::publicList("MV_CRNEG", "NCC")
+    else
+        aParts := ::publicList("MVPAGANT", "PA")
+        for nX := 1 to Len(aParts)
+            aAdd(aTypes, aParts[nX])
+        next nX
+        aParts := ::publicList("MV_CPNEG", "NDF")
+    endIf
+    for nX := 1 to Len(aParts)
+        aAdd(aTypes, aParts[nX])
+    next nX
+return aTypes
+
+/*/{Protheus.doc} publicList
+Lê uma variável pública do Financeiro (ex.: MVABATIM = "AB-|FB-|FC-") e separa os tipos.
+Aceita "|", "/" e "," como separador.
+@type method
+@author TDash
+@since 20/10/2026
+@param cName, character, nome da variável
+@param cDefault, character, valor quando a variável não existe
+@return array, tipos com 3 caracteres
+/*/
+method publicList(cName as character, cDefault as character) as array class TDashFinRepository
+    local cValue := cDefault as character
+    local aParts := {} as array
+    local aTypes := {} as array
+    local nX     := 0 as numeric
+
+    if Type(cName) == "C" .and. !Empty(&(cName))
+        cValue := &(cName)
+    endIf
+
+    cValue := StrTran(StrTran(cValue, "/", "|"), ",", "|")
+    aParts := StrTokArr2(cValue, "|", .F.)
+    for nX := 1 to Len(aParts)
+        if !Empty(aParts[nX])
+            aAdd(aTypes, PadR(AllTrim(aParts[nX]), 3))
+        endIf
+    next nX
+return aTypes
+
+/*/{Protheus.doc} motivesWithoutBank
+Motivos de baixa que não movimentam banco (ReadMotBx + MovBcoBx), excluídos do caixa
+realizado como no FINR620.
+@type method
+@author TDash
+@since 20/10/2026
+@return array, códigos de motivo (3 caracteres)
+/*/
+method motivesWithoutBank() as array class TDashFinRepository
+    local aMotives := {} as array
+    local aAll     := ReadMotBx() as array
+    local cCode    := "" as character
+    local nX       := 0 as numeric
+
+    for nX := 1 to Len(aAll)
+        cCode := SubStr(aAll[nX], 1, 3)
+        if !Empty(cCode) .and. !MovBcoBx(cCode, .T.)
+            aAdd(aMotives, cCode)
+        endIf
+    next nX
+return aMotives
+
+/*/{Protheus.doc} bankName
+Nome do banco para exibição: A6_NOME; se vier vazio ou só pontuação, usa A6_NREDUZ.
+@type static function
+@author TDash
+@since 20/10/2026
+@param cName, character, A6_NOME
+@param cShort, character, A6_NREDUZ
+@return character, nome
+/*/
+static function bankName(cName as character, cShort as character) as character
+    local cResult := AllTrim(cName) as character
+
+    if Len(StrTran(StrTran(cResult, ".", ""), "-", "")) == 0
+        cResult := AllTrim(cShort)
+    endIf
+return cResult

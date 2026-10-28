@@ -1,0 +1,145 @@
+#include "tlpp-core.th"
+
+namespace tdash.core
+
+#define MAX_MONTHS 24
+
+/*/{Protheus.doc} TDashPeriod
+Período de consulta de um indicador (dateFrom/dateTo) e o período de comparação
+(compare = none | prev | yoy). Não acessa banco.
+@type class
+@author TDash
+@since 20/10/2026
+/*/
+Class TDashPeriod
+    Public Data dFrom    as Date
+    Public Data dTo      as Date
+    Public Data cCompare as Character
+    Public Data cError   as Character
+
+    Public Method New() as Object
+    Public Method fromQuery(cFrom as Character, cTo as Character, cCompare as Character, dToday as Date) as Logical
+    Public Method hasCompare() as Logical
+    Public Method compareFrom() as Date
+    Public Method compareTo() as Date
+EndClass
+
+/*/{Protheus.doc} New
+Construtor.
+@type method
+@author TDash
+@since 20/10/2026
+@return object, instância
+/*/
+Method New() as Object Class TDashPeriod
+    ::dFrom    := CToD("")
+    ::dTo      := CToD("")
+    ::cCompare := "none"
+    ::cError   := ""
+Return Self
+
+/*/{Protheus.doc} fromQuery
+Preenche o período a partir da query string. Sem datas: do primeiro dia do mês até hoje.
+@type method
+@author TDash
+@since 20/10/2026
+@param cFrom, character, dateFrom (AAAAMMDD) ou vazio
+@param cTo, character, dateTo (AAAAMMDD) ou vazio
+@param cCompare, character, none | prev | yoy ou vazio
+@param dToday, date, data de referência (data do servidor)
+@return logical, .F. quando inválido; a mensagem fica em ::cError
+/*/
+Method fromQuery(cFrom as Character, cTo as Character, cCompare as Character, dToday as Date) as Logical Class TDashPeriod
+    Local cMode := Lower(AllTrim(cCompare)) as Character
+
+    ::cError := ""
+
+    If Empty(cFrom)
+        ::dFrom := FirstDate(dToday)
+    Else
+        ::dFrom := tdash.core.u_parseDate(cFrom)
+        If Empty(::dFrom)
+            ::cError := "dateFrom inválido. Use AAAAMMDD."
+        EndIf
+    EndIf
+
+    If Empty(::cError)
+        If Empty(cTo)
+            ::dTo := dToday
+        Else
+            ::dTo := tdash.core.u_parseDate(cTo)
+            If Empty(::dTo)
+                ::cError := "dateTo inválido. Use AAAAMMDD."
+            EndIf
+        EndIf
+    EndIf
+
+    If Empty(::cError) .And. ::dFrom > ::dTo
+        ::cError := "dateFrom maior que dateTo."
+    EndIf
+
+    If Empty(::cError) .And. tdash.core.u_monthsBetween(::dFrom, ::dTo) > MAX_MONTHS
+        ::cError := "Período maior que " + cValToChar(MAX_MONTHS) + " meses."
+    EndIf
+
+    If Empty(cMode)
+        cMode := "none"
+    EndIf
+
+    If Empty(::cError) .And. AScan({ "none", "prev", "yoy" }, {|x| x == cMode}) == 0
+        ::cError := "compare inválido. Use none, prev ou yoy."
+    EndIf
+
+    If Empty(::cError)
+        ::cCompare := cMode
+    EndIf
+
+Return Empty(::cError)
+
+/*/{Protheus.doc} hasCompare
+Indica se há período de comparação.
+@type method
+@author TDash
+@since 20/10/2026
+@return logical, .T. quando compare é prev ou yoy
+/*/
+Method hasCompare() as Logical Class TDashPeriod
+Return ::cCompare <> "none"
+
+/*/{Protheus.doc} compareFrom
+Início do período de comparação.
+prev: período imediatamente anterior, com a mesma quantidade de dias.
+yoy: mesmo período do ano anterior.
+@type method
+@author TDash
+@since 20/10/2026
+@return date, data inicial ou data vazia quando não há comparação
+/*/
+Method compareFrom() as Date Class TDashPeriod
+    Local dResult := CToD("") as Date
+
+    If ::cCompare == "prev"
+        dResult := ::dFrom - ((::dTo - ::dFrom) + 1)
+    ElseIf ::cCompare == "yoy"
+        dResult := YearSub(::dFrom, 1)
+    EndIf
+
+Return dResult
+
+/*/{Protheus.doc} compareTo
+Fim do período de comparação.
+@type method
+@author TDash
+@since 20/10/2026
+@return date, data final ou data vazia quando não há comparação
+/*/
+Method compareTo() as Date Class TDashPeriod
+    Local dResult := CToD("") as Date
+
+    If ::cCompare == "prev"
+        dResult := ::dFrom - 1
+    ElseIf ::cCompare == "yoy"
+        dResult := YearSub(::dTo, 1)
+    EndIf
+
+Return dResult

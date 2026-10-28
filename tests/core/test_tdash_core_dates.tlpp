@@ -1,0 +1,43 @@
+#include "tlpp-core.th"
+#include "tlpp-probat.th"
+
+namespace tests.core
+
+/*/{Protheus.doc} test_tdash_core_dates
+Testes PROBAT da diferença de datas com sinal (u_daysBetween), sem banco.
+Execução: appserver.exe -console -consolelog -run=tlpp.probat.run -env={AMBIENTE}
+@type class
+@author TDash
+@since 22/10/2026
+/*/
+@TestFixture()
+Class test_tdash_core_dates
+    Public Method New() as Object
+
+    @Test('daysBetween: data final depois da inicial é positivo')
+    Public Method daysBetween_LaterEnd_Positive() as Logical
+
+    @Test('daysBetween: data final antes da inicial é negativo')
+    Public Method daysBetween_EarlierEnd_Negative() as Logical
+
+    @Test('daysBetween: mesma data ou data vazia vale zero')
+    Public Method daysBetween_SameOrEmpty_Zero() as Logical
+EndClass
+
+Method New() as Object Class test_tdash_core_dates
+Return Self
+
+Method daysBetween_LaterEnd_Positive() as Logical Class test_tdash_core_dates
+    tlpp.probat.assertEquals(tdash.core.u_daysBetween(SToD("20261001"), SToD("20261022")), 21)
+    tlpp.probat.assertEquals(tdash.core.u_daysBetween(SToD("20251231"), SToD("20260101")), 1)
+Return .T.
+
+Method daysBetween_EarlierEnd_Negative() as Logical Class test_tdash_core_dates
+    tlpp.probat.assertEquals(tdash.core.u_daysBetween(SToD("20261022"), SToD("20261001")), -21)
+Return .T.
+
+Method daysBetween_SameOrEmpty_Zero() as Logical Class test_tdash_core_dates
+    tlpp.probat.assertEquals(tdash.core.u_daysBetween(SToD("20261022"), SToD("20261022")), 0)
+    tlpp.probat.assertEquals(tdash.core.u_daysBetween(CToD(""), SToD("20261022")), 0)
+    tlpp.probat.assertEquals(tdash.core.u_daysBetween(SToD("20261022"), CToD("")), 0)
+Return .T.

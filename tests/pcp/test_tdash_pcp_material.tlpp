@@ -1,0 +1,82 @@
+#include "tlpp-core.th"
+#include "tlpp-probat.th"
+
+namespace tests.pcp
+
+/*/{Protheus.doc} test_tdash_pcp_material
+Testes PROBAT do balanço de matéria-prima das OPs encerradas (sem banco).
+Exemplo da regra: produz 10, consome 11 e empenhou 12 = perda de 1 e devolução de 1.
+Execução: appserver.exe -console -consolelog -run=tlpp.probat.run -env={AMBIENTE}
+@type class
+@author TDash
+@since 22/10/2026
+/*/
+@TestFixture()
+Class test_tdash_pcp_material
+    Public Method New() as Object
+
+    @Test('materialTotals: perda = consumido - produzido; devolvido = empenhado - consumido')
+    Public Method materialTotals_Example_LossAndReturned() as Logical
+
+    @Test('materialTotals: OP sem empenho nem consumo fica fora e é contada')
+    Public Method materialTotals_OrderWithoutMaterial_IsSkipped() as Logical
+
+    @Test('materialTotals: soma os empenhos com unidade diferente')
+    Public Method materialTotals_OtherUnit_IsCounted() as Logical
+
+    @Test('lossRate: percentual do consumido; zero sem consumo')
+    Public Method lossRate_PercentOfConsumed() as Logical
+EndClass
+
+Method New() as Object Class test_tdash_pcp_material
+Return Self
+
+Method materialTotals_Example_LossAndReturned() as Logical Class test_tdash_pcp_material
+    local jTotals := tdash.pcp.u_materialTotals({ newOrder(10, 12, 11, 0), newOrder(5, 6, 5.5, 0) }) as json
+
+    tlpp.probat.assertEquals(jTotals["produced"], 15)
+    tlpp.probat.assertEquals(jTotals["reserved"], 18)
+    tlpp.probat.assertEquals(jTotals["consumed"], 16.5)
+    tlpp.probat.assertEquals(jTotals["loss"], 1.5)
+    tlpp.probat.assertEquals(jTotals["returned"], 1.5)
+    tlpp.probat.assertEquals(jTotals["orders"], 2)
+Return .T.
+
+Method materialTotals_OrderWithoutMaterial_IsSkipped() as Logical Class test_tdash_pcp_material
+    local jTotals := tdash.pcp.u_materialTotals({ newOrder(10, 12, 11, 0), newOrder(8, 0, 0, 3) }) as json
+
+    tlpp.probat.assertEquals(jTotals["produced"], 10)
+    tlpp.probat.assertEquals(jTotals["loss"], 1)
+    tlpp.probat.assertEquals(jTotals["orders"], 1)
+    tlpp.probat.assertEquals(jTotals["skipped"], 1)
+    tlpp.probat.assertEquals(tdash.pcp.u_materialCounts(newOrder(8, 0, 0, 3)), .F.)
+Return .T.
+
+Method materialTotals_OtherUnit_IsCounted() as Logical Class test_tdash_pcp_material
+    local jTotals := tdash.pcp.u_materialTotals({ newOrder(10, 12, 11, 2), newOrder(8, 0, 0, 3) }) as json
+
+    tlpp.probat.assertEquals(jTotals["otherUnit"], 5)
+Return .T.
+
+Method lossRate_PercentOfConsumed() as Logical Class test_tdash_pcp_material
+    tlpp.probat.assertEquals(tdash.pcp.u_lossRate(1, 11), 9.09)
+    tlpp.probat.assertEquals(tdash.pcp.u_lossRate(5, 0), 0)
+    tlpp.probat.assertEquals(tdash.pcp.u_lossRate(-1, 10), -10)
+Return .T.
+
+/*/{Protheus.doc} newOrder
+OP de teste no formato de TDashPcpRepository:closedOrderMaterials.
+@type static function
+/*/
+static function newOrder(nProduced as numeric, nReserved as numeric, nConsumed as numeric, nOtherUnit as numeric) as json
+    local jOrder := jsonObject():new() as json
+
+    jOrder["op"]        := "00000101001   "
+    jOrder["product"]   := "PA001"
+    jOrder["label"]     := "PRODUTO"
+    jOrder["closedAt"]  := "20261015"
+    jOrder["produced"]  := nProduced
+    jOrder["reserved"]  := nReserved
+    jOrder["consumed"]  := nConsumed
+    jOrder["otherUnit"] := nOtherUnit
+return jOrder

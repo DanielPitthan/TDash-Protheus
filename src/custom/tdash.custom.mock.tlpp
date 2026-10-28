@@ -1,0 +1,105 @@
+#include 'tlpp-core.th'
+#include 'tlpp-rest.th'
+#include 'totvs.ch'
+
+#define TTL_MOCK 60
+
+/*/{Protheus.doc} TDashCustomMockApi
+Painel personalizado de EXEMPLO, com dados fictícios fixos no fonte (não acessa o banco).
+É o modelo para criar painéis próprios: copie este fonte, troque a rota, o nome da classe e os valores fixos
+pelas suas consultas. Contrato do JSON: docs/09-painel-personalizado.md.
+
+No app: Módulos > Painéis personalizados > Adicionar painel, caminho /tdash/v1/custom/mock, qualquer módulo,
+"Usa período" ligado (o título mostra o período recebido).
+
+Lembretes das regras do projeto (docs/01-arquitetura.md):
+- só User Function/Static Function; API como classe com @Get;
+- consultas com tdash.core.TDashQuery e bind (?), RetSqlName, FWxFilial e D_E_L_E_T_;
+- sem IIf; sem "data menos data" (use tdash.core.u_daysBetween); MatiConcat() para concatenar no SQL;
+- fonte em Windows-1252 + CRLF; sem return dentro do TRY.
+@type class
+@author TDash
+@since 23/10/2026
+@version 1.0
+/*/
+namespace tdash.custom
+
+class TDashCustomMockApi
+    public method new()
+
+    @Get("/tdash/v1/custom/mock")
+    public method getPanel()
+endclass
+
+method new() class TDashCustomMockApi
+return self
+
+/*/{Protheus.doc} getPanel
+GET /tdash/v1/custom/mock?dateFrom=AAAAMMDD&dateTo=AAAAMMDD
+Devolve um widget de cada tipo: 3 KPIs, colunas, barras e tabela, nesta ordem.
+@type method
+@author TDash
+@since 23/10/2026
+@return logical, sempre .T.
+/*/
+method getPanel() class TDashCustomMockApi
+    local oRequest := tdash.core.TDashRequest():new() as object
+    local oHelper  := tdash.core.TDashResponseHelper():new() as object
+    local oPeriod  := tdash.core.TDashPeriod():new() as object
+    local oPanel   as object
+    local cTitle   := "" as character
+
+    // 1. Leia e valide os parâmetros ANTES do TRY. dateFrom/dateTo só chegam quando o painel foi
+    //    cadastrado no app com "Usa período"; sem eles, TDashPeriod usa do dia 1 do mês até hoje.
+    if !oPeriod:fromQuery(oRequest:query("dateFrom"), oRequest:query("dateTo"), "none", Date())
+        oHelper:badRequest(oPeriod:cError)
+        return .T.
+    endIf
+
+    TRY
+        // 2. Título e validade (segundos) do cache no app.
+        cTitle := "Painel de exemplo · " + DToC(oPeriod:dFrom) + " a " + DToC(oPeriod:dTo)
+        oPanel := tdash.core.TDashPanelBuilder():new(cTitle, TTL_MOCK)
+
+        // 3. Os widgets aparecem no app NA ORDEM em que são adicionados.
+        //    Troque os valores fixos pelas suas consultas (TDashQuery com bind), por exemplo:
+        //    oPanel:addKpiTarget("Faturado", oRepo:revenue(oPeriod:dFrom, oPeriod:dTo), oRepo:target(...), "BRL", "up_is_good")
+
+        // KPI com meta, maior é melhor: o app mostra o % atingido em verde quando bate a meta
+        oPanel:addKpiTarget("Faturado", 1284500.75, 1500000, "BRL", "up_is_good")
+        // KPI com meta, menor é melhor: acima da meta fica vermelho
+        oPanel:addKpiTarget("Devoluções", 3.2, 2, "PCT", "down_is_good")
+        // KPI sem meta
+        oPanel:addKpi("Pedidos em aberto", 148, "COUNT")
+
+        // Colunas: uma categoria por mês, uma série por indicador (um valor por categoria)
+        oPanel:addColumnChart("Faturado x Devolvido x Pendentes", "Mês", "R$ mil", "QTY",;
+            { "Mai", "Jun", "Jul", "Ago", "Set", "Out" },;
+            {;
+                { "Faturado",  { 44, 55, 57, 56, 61, 58 } },;
+                { "Devolvido", { 76, 85, 101, 98, 87, 105 } },;
+                { "Pendentes", { 35, 41, 36, 26, 45, 48 } } })
+
+        // Barras horizontais: uma série por vendedor
+        oPanel:addBarChart("Vendas por vendedor", "Mês", "R$", "BRL",;
+            { "Ago", "Set", "Out" },;
+            {;
+                { "João",   { 44000, 55000, 57000 } },;
+                { "Maria",  { 76000, 85000, 101000 } },;
+                { "Manuel", { 35000, 41000, 36000 } } })
+
+        // Tabela: colunas com rótulo e unidade (vazia = texto); linhas com texto ou número
+        oPanel:addTable("Maiores clientes",;
+            { { "Cliente", "" }, { "Pedidos", "COUNT" }, { "Valor", "BRL" } },;
+            {;
+                { "ACME INDÚSTRIA LTDA",     12, 182340.5 },;
+                { "COMERCIAL BOA VISTA S/A",  8, 96500 },;
+                { "DISTRIBUIDORA SUL LTDA",   5, 41230.9 } })
+
+        // 4. Responda com o helper do TDash (UTF-8, Content-Type e Cache-Control).
+        oHelper:setCacheHeaders(TTL_MOCK)
+        oRest:setResponse(oHelper:getResponse(oPanel:getJson()))
+    CATCH oError
+        oHelper:serverError("TDashCustomMockApi:getPanel", oError:description)
+    ENDTRY
+return .T.

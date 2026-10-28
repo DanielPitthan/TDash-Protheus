@@ -1,0 +1,132 @@
+#include "tlpp-core.th"
+#include "tlpp-probat.th"
+
+namespace tests.com
+
+/*/{Protheus.doc} test_tdash_com_trace
+Testes PROBAT do acompanhamento solicitação -> pedido -> entrega de Compras, sem banco.
+Exemplo da regra: solicito 10, pedem 7, chegam 5 = 70% pedido e 71,43% entregue do pedido.
+Execução: appserver.exe -console -consolelog -run=tlpp.probat.run -env={AMBIENTE}
+@type class
+@author TDash
+@since 25/10/2026
+/*/
+@TestFixture()
+Class test_tdash_com_trace
+    Public Method New() as Object
+
+    @Test('traceItems: solicitado 10, pedido 7, entregue 5')
+    Public Method traceItems_Example_PercentOrderedAndDelivered() as Logical
+
+    @Test('traceItems: pedido em dólar vai para reais pela taxa do pedido')
+    Public Method traceItems_ForeignCurrency_ConvertsOrderValue() as Logical
+
+    @Test('traceItems: item de SC em dois pedidos soma quantidades e valores')
+    Public Method traceItems_TwoOrders_SumsUp() as Logical
+
+    @Test('traceItems: SC sem pedido fica sem valor solicitado')
+    Public Method traceItems_WithoutOrder_HasNoValue() as Logical
+
+    @Test('traceItems: pedido maior que a solicitação passa de 100%')
+    Public Method traceItems_OverOrder_PercentAbove100() as Logical
+
+    @Test('traceTotals: soma valores e conta itens sem pedido e parciais')
+    Public Method traceTotals_SumsAndCounts() as Logical
+
+    @Test('percentOf: sem total é zero')
+    Public Method percentOf_NoTotal_IsZero() as Logical
+EndClass
+
+Method New() as Object Class test_tdash_com_trace
+Return Self
+
+Static Function newRow(cSc as character, cItem as character, nRequested as numeric, cOrder as character, cOrderItem as character, nOrdered as numeric, nDelivered as numeric, nPrice as numeric, nCurrency as numeric, nRate as numeric, nInvoice as numeric) as json
+    local jRow := jsonObject():new() as json
+
+    jRow["numsc"]     := cSc
+    jRow["itemsc"]    := cItem
+    jRow["produto"]   := "BR0001"
+    jRow["descricao"] := "RESINA"
+    jRow["um"]        := "KG"
+    jRow["qtdsc"]     := nRequested
+    jRow["emissao"]   := "20261001"
+    jRow["numpc"]     := cOrder
+    jRow["itempc"]    := cOrderItem
+    jRow["qtdpc"]     := nOrdered
+    jRow["qtdent"]    := nDelivered
+    jRow["preco"]     := nPrice
+    jRow["moeda"]     := nCurrency
+    jRow["taxa"]      := nRate
+    jRow["valornf"]   := nInvoice
+return jRow
+
+Method traceItems_Example_PercentOrderedAndDelivered() as Logical Class test_tdash_com_trace
+    local aItems := tdash.com.u_traceItems({ newRow("000001", "0001", 10, "000100", "0001", 7, 5, 100, 1, 0, 500) }) as array
+
+    tlpp.probat.assertEquals(Len(aItems), 1)
+    tlpp.probat.assertEquals(aItems[1]["document"], "SC 000001/0001")
+    tlpp.probat.assertEquals(aItems[1]["party"], "Pedido 000100/0001")
+    tlpp.probat.assertEquals(aItems[1]["pctOrdered"], 70)
+    tlpp.probat.assertEquals(aItems[1]["pctDelivered"], 71.43)
+    tlpp.probat.assertEquals(aItems[1]["orderedValue"], 700)
+    tlpp.probat.assertEquals(aItems[1]["deliveredValue"], 500)
+    tlpp.probat.assertEquals(aItems[1]["requestedValue"], 1000)
+Return .T.
+
+Method traceItems_ForeignCurrency_ConvertsOrderValue() as Logical Class test_tdash_com_trace
+    local aItems := tdash.com.u_traceItems({ newRow("000002", "0001", 100, "000200", "0001", 100, 100, 2, 2, 5, 1000) }) as array
+
+    tlpp.probat.assertEquals(aItems[1]["orderedValue"], 1000)
+    tlpp.probat.assertEquals(aItems[1]["requestedValue"], 1000)
+Return .T.
+
+Method traceItems_TwoOrders_SumsUp() as Logical Class test_tdash_com_trace
+    local aItems := tdash.com.u_traceItems({;
+        newRow("000003", "0001", 10, "000300", "0001", 4, 4, 10, 1, 0, 40),;
+        newRow("000003", "0001", 10, "000301", "0002", 6, 2, 20, 1, 0, 40) }) as array
+
+    tlpp.probat.assertEquals(Len(aItems), 1)
+    tlpp.probat.assertEquals(aItems[1]["party"], "2 pedidos")
+    tlpp.probat.assertEquals(aItems[1]["ordered"], 10)
+    tlpp.probat.assertEquals(aItems[1]["delivered"], 6)
+    tlpp.probat.assertEquals(aItems[1]["orderedValue"], 160)
+    tlpp.probat.assertEquals(aItems[1]["deliveredValue"], 80)
+    tlpp.probat.assertEquals(aItems[1]["requestedValue"], 160)
+Return .T.
+
+Method traceItems_WithoutOrder_HasNoValue() as Logical Class test_tdash_com_trace
+    local aItems := tdash.com.u_traceItems({ newRow("000004", "0001", 10, "", "", 0, 0, 0, 0, 0, 0) }) as array
+
+    tlpp.probat.assertEquals(aItems[1]["party"], "Sem pedido")
+    tlpp.probat.assertEquals(aItems[1]["ordered"], 0)
+    tlpp.probat.assertEquals(aItems[1]["requestedValue"], 0)
+    tlpp.probat.assertEquals(aItems[1]["pctOrdered"], 0)
+Return .T.
+
+Method traceItems_OverOrder_PercentAbove100() as Logical Class test_tdash_com_trace
+    local aItems := tdash.com.u_traceItems({ newRow("000005", "0001", 44000, "000500", "0001", 50000, 0, 1, 1, 0, 0) }) as array
+
+    tlpp.probat.assertEquals(aItems[1]["pctOrdered"], 113.64)
+    tlpp.probat.assertEquals(aItems[1]["requestedValue"], 44000)
+    tlpp.probat.assertEquals(aItems[1]["orderedValue"], 50000)
+Return .T.
+
+Method traceTotals_SumsAndCounts() as Logical Class test_tdash_com_trace
+    local aItems  := tdash.com.u_traceItems({;
+        newRow("000006", "0001", 10, "000600", "0001", 7, 5, 100, 1, 0, 500),;
+        newRow("000006", "0002", 10, "", "", 0, 0, 0, 0, 0, 0),;
+        newRow("000007", "0001", 10, "000700", "0001", 10, 10, 10, 1, 0, 100) }) as array
+    local jTotals := tdash.com.u_traceTotals(aItems) as json
+
+    tlpp.probat.assertEquals(jTotals["items"], 3)
+    tlpp.probat.assertEquals(jTotals["unordered"], 1)
+    tlpp.probat.assertEquals(jTotals["partial"], 1)
+    tlpp.probat.assertEquals(jTotals["requestedValue"], 1100)
+    tlpp.probat.assertEquals(jTotals["orderedValue"], 800)
+    tlpp.probat.assertEquals(jTotals["deliveredValue"], 600)
+Return .T.
+
+Method percentOf_NoTotal_IsZero() as Logical Class test_tdash_com_trace
+    tlpp.probat.assertEquals(tdash.com.u_percentOf(5, 0), 0)
+    tlpp.probat.assertEquals(tdash.com.u_percentOf(5, 10), 50)
+Return .T.

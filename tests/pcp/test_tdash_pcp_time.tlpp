@@ -1,0 +1,74 @@
+#include "tlpp-core.th"
+#include "tlpp-probat.th"
+
+namespace tests.pcp
+
+/*/{Protheus.doc} test_tdash_pcp_time
+Testes PROBAT da conversão do tempo da SH6 (texto) em horas (sem banco).
+Execução: appserver.exe -console -consolelog -run=tlpp.probat.run -env={AMBIENTE}
+@type class
+@author TDash
+@since 21/10/2026
+/*/
+@TestFixture()
+Class test_tdash_pcp_time
+    Public Method New() as Object
+
+    @Test('timeToHours: horas e minutos viram horas decimais')
+    Public Method timeToHours_HoursAndMinutes_ReturnsDecimal() as Logical
+
+    @Test('timeToHours: horas com três dígitos')
+    Public Method timeToHours_ThreeDigitHours_ReturnsHours() as Logical
+
+    @Test('timeToHours: vazio, sem dois-pontos ou inválido vale zero')
+    Public Method timeToHours_InvalidText_ReturnsZero() as Logical
+
+    @Test('timeToHours: minutos 60 ou mais valem zero')
+    Public Method timeToHours_MinutesOutOfRange_ReturnsZero() as Logical
+
+    @Test('timeToHours: centesimal lê centésimos de hora')
+    Public Method timeToHours_Centesimal_ReadsHundredths() as Logical
+
+    @Test('isCentesimal: H6_TIPOTEM decide; sem ele vale o MV_TPHR')
+    Public Method isCentesimal_TimeTypeOrParameter() as Logical
+EndClass
+
+Method New() as Object Class test_tdash_pcp_time
+Return Self
+
+Method timeToHours_HoursAndMinutes_ReturnsDecimal() as Logical Class test_tdash_pcp_time
+    tlpp.probat.assertEquals(tdash.pcp.u_timeToHours("08:30", .F.), 8.5)
+    tlpp.probat.assertEquals(tdash.pcp.u_timeToHours(" 12:15", .F.), 12.25)
+    tlpp.probat.assertEquals(tdash.pcp.u_timeToHours("00:20", .F.), 0.33)
+Return .T.
+
+Method timeToHours_ThreeDigitHours_ReturnsHours() as Logical Class test_tdash_pcp_time
+    tlpp.probat.assertEquals(tdash.pcp.u_timeToHours("100:00", .F.), 100)
+    tlpp.probat.assertEquals(tdash.pcp.u_timeToHours("120:45", .F.), 120.75)
+Return .T.
+
+Method timeToHours_InvalidText_ReturnsZero() as Logical Class test_tdash_pcp_time
+    tlpp.probat.assertEquals(tdash.pcp.u_timeToHours("", .F.), 0)
+    tlpp.probat.assertEquals(tdash.pcp.u_timeToHours("8", .F.), 0)
+    tlpp.probat.assertEquals(tdash.pcp.u_timeToHours("ab:cd", .F.), 0)
+    tlpp.probat.assertEquals(tdash.pcp.u_timeToHours("ab:cd", .T.), 0)
+Return .T.
+
+Method timeToHours_MinutesOutOfRange_ReturnsZero() as Logical Class test_tdash_pcp_time
+    tlpp.probat.assertEquals(tdash.pcp.u_timeToHours("08:60", .F.), 0)
+    tlpp.probat.assertEquals(tdash.pcp.u_timeToHours("08:99", .F.), 0)
+Return .T.
+
+Method timeToHours_Centesimal_ReadsHundredths() as Logical Class test_tdash_pcp_time
+    tlpp.probat.assertEquals(tdash.pcp.u_timeToHours("01:50", .T.), 1.5)
+    tlpp.probat.assertEquals(tdash.pcp.u_timeToHours("08:75", .T.), 8.75)
+    tlpp.probat.assertEquals(tdash.pcp.u_timeToHours("120:05", .T.), 120.05)
+Return .T.
+
+Method isCentesimal_TimeTypeOrParameter() as Logical Class test_tdash_pcp_time
+    tlpp.probat.assertEquals(tdash.pcp.u_isCentesimal(1, "C"), .F.)
+    tlpp.probat.assertEquals(tdash.pcp.u_isCentesimal(2, "N"), .T.)
+    tlpp.probat.assertEquals(tdash.pcp.u_isCentesimal(0, "C"), .T.)
+    tlpp.probat.assertEquals(tdash.pcp.u_isCentesimal(0, " c "), .T.)
+    tlpp.probat.assertEquals(tdash.pcp.u_isCentesimal(0, "N"), .F.)
+Return .T.

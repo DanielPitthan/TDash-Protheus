@@ -1,0 +1,481 @@
+#include 'tlpp-core.th'
+#include 'tlpp-rest.th'
+#include 'totvs.ch'
+
+// Validade das respostas (segundos): operacional, tático, estratégico
+#define TTL_OP  300
+#define TTL_TAT 1800
+#define TTL_EST 43200
+
+#define DEFAULT_TOP       10
+#define DEFAULT_PAGE_SIZE 20
+
+/*/{Protheus.doc} TDashFatApi
+APIs de negócio do Faturamento para o TDash.
+Rotas: catalog, kpis, series/:id, breakdown/:id, list/:id (prefixo /tdash/v1/fat).
+Indicadores e regras: docs/10-catalogo-de-indicadores.md (seção Faturamento).
+Formato das respostas (o que o app espera): docs/02-contrato-de-resposta.md.
+@type class
+@author TDash
+@since 20/10/2026
+@version 1.0
+/*/
+namespace tdash.fat
+
+class TDashFatApi
+    public method new()
+
+    @Get("/tdash/v1/fat/catalog")
+    public method getCatalog()
+
+    @Get("/tdash/v1/fat/kpis")
+    public method getKpis()
+
+    @Get("/tdash/v1/fat/series/:id")
+    public method getSeries()
+
+    @Get("/tdash/v1/fat/breakdown/:id")
+    public method getBreakdown()
+
+    @Get("/tdash/v1/fat/list/:id")
+    public method getList()
+
+    private data cResultKey  as character
+    private data aResultRows as array
+    private data lReform     as logical
+
+    private method kpiValue(cId as character, dFrom as date, dTo as date) as numeric
+    private method resultRows(dFrom as date, dTo as date) as array
+    private method readRegime(oRequest as object, oHelper as object) as logical
+endclass
+
+method new() class TDashFatApi
+    ::cResultKey  := ""
+    ::aResultRows := {}
+    ::lReform     := .F.
+return self
+
+/*/{Protheus.doc} resultRows
+Linhas do resultado (lucro e impostos) do período, guardadas para não repetir a consulta na mesma requisição (os
+cartões de lucro bruto, lucro líquido e impostos usam o mesmo resultado).
+@type method
+@author TDash
+@since 26/10/2026
+@param dFrom, date, início
+@param dTo, date, fim
+@return array, linhas de TDashFatRepository:resultRows
+/*/
+method resultRows(dFrom as date, dTo as date) as array class TDashFatApi
+    local cKey := DToS(dFrom) + DToS(dTo) as character
+    local oRepo as object
+
+    if !(::cResultKey == cKey)
+        oRepo         := TDashFatRepository():new()
+        ::aResultRows := oRepo:resultRows(dFrom, dTo)
+        ::cResultKey  := cKey
+    endIf
+return ::aResultRows
+
+/*/{Protheus.doc} readRegime
+Lê o parâmetro taxRegime (current = PIS e COFINS no total de impostos; reform = CBS e IBS). Responde 400 quando é
+inválido.
+@type method
+@author TDash
+@since 26/10/2026
+@param oRequest, object, TDashRequest
+@param oHelper, object, TDashResponseHelper
+@return logical, .T. quando é válido
+/*/
+method readRegime(oRequest as object, oHelper as object) as logical class TDashFatApi
+    local lOk := tdash.fat.u_isTaxRegime(oRequest:query("taxRegime")) as logical
+
+    if lOk
+        ::lReform := tdash.fat.u_isReformRegime(oRequest:query("taxRegime"))
+    else
+        oHelper:badRequest("taxRegime inválido. Use current ou reform.")
+    endIf
+return lOk
+
+/*/{Protheus.doc} getCatalog
+GET /tdash/v1/fat/catalog
+@type method
+@author TDash
+@since 20/10/2026
+@return logical, sempre .T.
+/*/
+method getCatalog() class TDashFatApi
+    local oHelper := tdash.core.TDashResponseHelper():new() as object
+    local jBody   := jsonObject():new() as json
+
+    jBody["items"] := tdash.core.u_catalogItems(fatCatalog())
+    oHelper:setCacheHeaders(TTL_EST)
+    oRest:setResponse(oHelper:getResponse(jBody))
+return .T.
+
+/*/{Protheus.doc} getKpis
+GET /tdash/v1/fat/kpis?ids=a,b&dateFrom=AAAAMMDD&dateTo=AAAAMMDD&compare=none|prev|yoy&taxRegime=current|reform
+Indicadores de período aceitam comparação; a carteira (fat.backlog) é posição de hoje. taxRegime vale para os
+impostos e o lucro líquido (fat.taxes, fat.net_profit).
+@type method
+@author TDash
+@since 20/10/2026
+@return logical, sempre .T.
+/*/
+method getKpis() class TDashFatApi
+    local oRequest := tdash.core.TDashRequest():new() as object
+    local oHelper  := tdash.core.TDashResponseHelper():new() as object
+    local oPeriod  := tdash.core.TDashPeriod():new() as object
+    local oRepo    := TDashFatRepository():new() as object
+    local jBody    := jsonObject():new() as json
+    local jItem    as json
+    local aIds     := {} as array
+    local aItems   := {} as array
+    local aDef     := {} as array
+    local lCompare := .F. as logical
+    local nTtl     := TTL_EST as numeric
+    local nValue   := 0 as numeric
+    local nPrev    := 0 as numeric
+    local nX       := 0 as numeric
+
+    aIds := StrTokArr2(oRequest:query("ids"), ",", .F.)
+    if Len(aIds) == 0 .or. Len(aIds) > 20
+        oHelper:badRequest("Informe de 1 a 20 indicadores em ids.")
+        return .T.
+    endIf
+
+    if !oPeriod:fromQuery(oRequest:query("dateFrom"), oRequest:query("dateTo"), oRequest:query("compare"), Date())
+        oHelper:badRequest(oPeriod:cError)
+        return .T.
+    endIf
+
+    if !::readRegime(oRequest, oHelper)
+        return .T.
+    endIf
+
+    for nX := 1 to Len(aIds)
+        if Len(tdash.core.u_findIndicator(fatCatalog(), aIds[nX], "kpi")) == 0
+            oHelper:notFound(AllTrim(aIds[nX]), "fat")
+            return .T.
+        endIf
+    next nX
+
+    TRY
+        for nX := 1 to Len(aIds)
+            aDef     := tdash.core.u_findIndicator(fatCatalog(), aIds[nX], "kpi")
+            nValue   := ::kpiValue(aDef[1], oPeriod:dFrom, oPeriod:dTo)
+            lCompare := oPeriod:hasCompare() .and. aDef[1] <> "fat.backlog"
+            nPrev    := 0
+            if lCompare
+                nPrev := ::kpiValue(aDef[1], oPeriod:compareFrom(), oPeriod:compareTo())
+            endIf
+
+            jItem := tdash.core.u_kpiItem(aDef, nValue, lCompare, oPeriod:cCompare, nPrev, oHelper:timestamp())
+            // Sem meta cadastrada no período o percentual não tem significado
+            if aDef[1] == "fat.target_attainment" .and. oRepo:target(oPeriod:dFrom, oPeriod:dTo) == 0
+                jItem["title"]   := "Meta x realizado (sem meta no período)"
+                jItem["compare"] := Nil
+            endIf
+
+            aAdd(aItems, jItem)
+            nTtl := Min(nTtl, aDef[6])
+        next nX
+
+        jBody["items"] := aItems
+        oHelper:setCacheHeaders(nTtl)
+        oRest:setResponse(oHelper:getResponse(jBody))
+    CATCH oError
+        oHelper:serverError("TDashFatApi:kpis", oError:description)
+    ENDTRY
+return .T.
+
+/*/{Protheus.doc} getSeries
+GET /tdash/v1/fat/series/fat.revenue?dateFrom&dateTo&grain=day|week|month
+Séries "revenue" (faturamento bruto) e "returns" (devoluções) no período.
+GET /tdash/v1/fat/series/fat.result?dateFrom&dateTo&taxRegime=current|reform
+Sempre mensal: séries "gross" (lucro bruto), "net" (lucro líquido) e "taxes" (impostos), com aviso nos meses de custo
+incompleto (mais de 2% da venda sem custo calculado).
+@type method
+@author TDash
+@since 20/10/2026
+@return logical, sempre .T.
+/*/
+method getSeries() class TDashFatApi
+    local oRequest := tdash.core.TDashRequest():new() as object
+    local oHelper  := tdash.core.TDashResponseHelper():new() as object
+    local oPeriod  := tdash.core.TDashPeriod():new() as object
+    local oRepo    := TDashFatRepository():new() as object
+    local jBody    := jsonObject():new() as json
+    local aDef     := {} as array
+    local aRevenue := {} as array
+    local aReturns := {} as array
+    local aKeys    := {} as array
+    local aPoints  := {} as array
+    local aMonths  := {} as array
+    local aSeries  := {} as array
+    local aWarning := {} as array
+    local cId      := oRequest:path("id") as character
+    local cGrain   := Lower(oRequest:query("grain")) as character
+    local nX       := 0 as numeric
+
+    aDef := tdash.core.u_findIndicator(fatCatalog(), cId, "series")
+    if Len(aDef) == 0
+        oHelper:notFound(cId, "fat")
+        return .T.
+    endIf
+
+    if Empty(cGrain)
+        cGrain := "day"
+    endIf
+    if AScan({ "day", "week", "month" }, {|x| x == cGrain}) == 0
+        oHelper:badRequest("grain inválido. Use day, week ou month.")
+        return .T.
+    endIf
+
+    if !oPeriod:fromQuery(oRequest:query("dateFrom"), oRequest:query("dateTo"), "none", Date())
+        oHelper:badRequest(oPeriod:cError)
+        return .T.
+    endIf
+
+    if !::readRegime(oRequest, oHelper)
+        return .T.
+    endIf
+
+    TRY
+        if cId == "fat.result"
+            cGrain  := "month"
+            aMonths := tdash.fat.u_resultMonths(::resultRows(oPeriod:dFrom, oPeriod:dTo), ::lReform)
+            for nX := 1 to Len(aMonths)
+                aAdd(aPoints, tdash.core.u_jsonPoint(aMonths[nX]["month"], aMonths[nX]["gross"], "gross"))
+                aAdd(aPoints, tdash.core.u_jsonPoint(aMonths[nX]["month"], aMonths[nX]["net"], "net"))
+                aAdd(aPoints, tdash.core.u_jsonPoint(aMonths[nX]["month"], aMonths[nX]["taxes"], "taxes"))
+                if aMonths[nX]["costIncomplete"]
+                    aAdd(aWarning, "Custo incompleto em " + tdash.fat.u_monthLabel(aMonths[nX]["month"]) + ": " +;
+                        AllTrim(Transform(aMonths[nX]["uncostedPct"], "@E 999.99")) +;
+                        "% das vendas sem custo calculado. O lucro desse mês fica maior que o real.")
+                endIf
+            next nX
+            aSeries := { "gross", "net", "taxes" }
+            jBody["warnings"] := aWarning
+        else
+            aRevenue := tdash.core.u_groupRows(oRepo:revenueByDay(oPeriod:dFrom, oPeriod:dTo), cGrain)
+            aReturns := tdash.core.u_groupRows(oRepo:returnsByDay(oPeriod:dFrom, oPeriod:dTo), cGrain)
+            aKeys    := tdash.core.u_mergeKeys(aRevenue, aReturns)
+            for nX := 1 to Len(aKeys)
+                aAdd(aPoints, tdash.core.u_jsonPoint(aKeys[nX], tdash.core.u_valueOf(aRevenue, aKeys[nX]), "revenue"))
+                aAdd(aPoints, tdash.core.u_jsonPoint(aKeys[nX], tdash.core.u_valueOf(aReturns, aKeys[nX]), "returns"))
+            next nX
+            aSeries := { "revenue", "returns" }
+        endIf
+
+        jBody["id"]          := aDef[1]
+        jBody["unit"]        := aDef[4]
+        jBody["grain"]       := cGrain
+        jBody["series"]      := aSeries
+        jBody["points"]      := aPoints
+        jBody["generatedAt"] := oHelper:timestamp()
+        jBody["ttl"]         := aDef[6]
+
+        oHelper:setCacheHeaders(aDef[6])
+        oRest:setResponse(oHelper:getResponse(jBody))
+    CATCH oError
+        oHelper:serverError("TDashFatApi:series", oError:description)
+    ENDTRY
+return .T.
+
+/*/{Protheus.doc} getBreakdown
+GET /tdash/v1/fat/breakdown/:id?top=10&dateFrom&dateTo
+Rankings de faturamento por cliente, produto, vendedor e UF.
+GET /tdash/v1/fat/breakdown/fat.taxes_by_type?dateFrom&dateTo&taxRegime=current|reform
+Impostos das vendas por tipo (ICMS, IPI, ICMS-ST, ISS, PIS, COFINS, CBS, IBS); o par fora do total vem marcado.
+@type method
+@author TDash
+@since 20/10/2026
+@return logical, sempre .T.
+/*/
+method getBreakdown() class TDashFatApi
+    local oRequest   := tdash.core.TDashRequest():new() as object
+    local oHelper    := tdash.core.TDashResponseHelper():new() as object
+    local oPeriod    := tdash.core.TDashPeriod():new() as object
+    local oRepo      := TDashFatRepository():new() as object
+    local jBody      := jsonObject():new() as json
+    local aDef       := {} as array
+    local aItems     := {} as array
+    local cId        := oRequest:path("id") as character
+    local cDimension := "" as character
+    local nTop       := 0 as numeric
+
+    aDef := tdash.core.u_findIndicator(fatCatalog(), cId, "breakdown")
+    if Len(aDef) == 0
+        oHelper:notFound(cId, "fat")
+        return .T.
+    endIf
+
+    nTop := tdash.core.u_parseInt(oRequest:query("top"), DEFAULT_TOP, 1, 50)
+    if nTop < 0
+        oHelper:badRequest("top deve estar entre 1 e 50.")
+        return .T.
+    endIf
+
+    if !oPeriod:fromQuery(oRequest:query("dateFrom"), oRequest:query("dateTo"), "none", Date())
+        oHelper:badRequest(oPeriod:cError)
+        return .T.
+    endIf
+
+    if !::readRegime(oRequest, oHelper)
+        return .T.
+    endIf
+
+    do case
+        case cId == "fat.top_customers"
+            cDimension := "customer"
+        case cId == "fat.top_products"
+            cDimension := "product"
+        case cId == "fat.by_seller"
+            cDimension := "seller"
+        otherwise
+            cDimension := "state"
+    endCase
+
+    TRY
+        if cId == "fat.taxes_by_type"
+            aItems := tdash.fat.u_taxItems(tdash.fat.u_resultSum(::resultRows(oPeriod:dFrom, oPeriod:dTo), ::lReform), ::lReform)
+        else
+            // Busca todas as linhas para somar o restante em "Outros"
+            aItems := tdash.core.u_rowsToItems(oRepo:revenueBy(cDimension, oPeriod:dFrom, oPeriod:dTo, 0))
+            aItems := tdash.core.u_topWithOthers(aItems, nTop, "Outros")
+        endIf
+
+        jBody["id"]          := aDef[1]
+        jBody["unit"]        := aDef[4]
+        jBody["items"]       := tdash.core.u_applyShares(aItems)
+        jBody["generatedAt"] := oHelper:timestamp()
+        jBody["ttl"]         := aDef[6]
+
+        oHelper:setCacheHeaders(aDef[6])
+        oRest:setResponse(oHelper:getResponse(jBody))
+    CATCH oError
+        oHelper:serverError("TDashFatApi:breakdown", oError:description)
+    ENDTRY
+return .T.
+
+/*/{Protheus.doc} getList
+GET /tdash/v1/fat/list/fat.backlog?page=1&pageSize=20
+Itens da carteira de pedidos, pela data de entrega.
+@type method
+@author TDash
+@since 20/10/2026
+@return logical, sempre .T.
+/*/
+method getList() class TDashFatApi
+    local oRequest  := tdash.core.TDashRequest():new() as object
+    local oHelper   := tdash.core.TDashResponseHelper():new() as object
+    local oRepo     := TDashFatRepository():new() as object
+    local jBody     as json
+    local aDef      := {} as array
+    local aColumns  := {} as array
+    local cId       := oRequest:path("id") as character
+    local nPage     := 0 as numeric
+    local nPageSize := 0 as numeric
+
+    aDef := tdash.core.u_findIndicator(fatCatalog(), cId, "list")
+    if Len(aDef) == 0
+        oHelper:notFound(cId, "fat")
+        return .T.
+    endIf
+
+    nPage     := tdash.core.u_parseInt(oRequest:query("page"), 1, 1, 100000)
+    nPageSize := tdash.core.u_parseInt(oRequest:query("pageSize"), DEFAULT_PAGE_SIZE, 1, 100)
+    if nPage < 0 .or. nPageSize < 0
+        oHelper:badRequest("page deve ser maior que zero e pageSize entre 1 e 100.")
+        return .T.
+    endIf
+
+    aAdd(aColumns, tdash.core.u_jsonColumn("document", "Pedido", "text"))
+    aAdd(aColumns, tdash.core.u_jsonColumn("party", "Cliente", "text"))
+    aAdd(aColumns, tdash.core.u_jsonColumn("product", "Produto", "text"))
+    aAdd(aColumns, tdash.core.u_jsonColumn("dueDate", "Entrega", "date"))
+    aAdd(aColumns, tdash.core.u_jsonColumn("quantity", "Saldo (qtd.)", "QTY"))
+    aAdd(aColumns, tdash.core.u_jsonColumn("balance", "Saldo (R$)", "BRL"))
+
+    TRY
+        jBody := oRepo:backlogItems(nPage, nPageSize)
+        jBody["columns"] := aColumns
+
+        oHelper:setCacheHeaders(aDef[6])
+        oRest:setResponse(oHelper:getResponse(jBody))
+    CATCH oError
+        oHelper:serverError("TDashFatApi:list", oError:description)
+    ENDTRY
+return .T.
+
+/*/{Protheus.doc} kpiValue
+Calcula o valor de um cartão.
+@type method
+@author TDash
+@since 20/10/2026
+@param cId, character, id do indicador
+@param dFrom, date, início do período
+@param dTo, date, fim do período
+@return numeric, valor
+/*/
+method kpiValue(cId as character, dFrom as date, dTo as date) as numeric class TDashFatApi
+    local oRepo   := TDashFatRepository():new() as object
+    local nValue  := 0 as numeric
+    local nCount  := 0 as numeric
+    local nTarget := 0 as numeric
+
+    do case
+        case cId == "fat.revenue"
+            nValue := oRepo:revenue(dFrom, dTo)
+        case cId == "fat.revenue_net"
+            nValue := oRepo:revenue(dFrom, dTo) - oRepo:returns(dFrom, dTo)
+        case cId == "fat.invoice_count"
+            nValue := oRepo:invoiceCount(dFrom, dTo)
+        case cId == "fat.avg_ticket"
+            nCount := oRepo:invoiceCount(dFrom, dTo)
+            if nCount > 0
+                nValue := oRepo:revenue(dFrom, dTo) / nCount
+            endIf
+        case cId == "fat.returns"
+            nValue := oRepo:returns(dFrom, dTo)
+        case cId == "fat.target_attainment"
+            nTarget := oRepo:target(dFrom, dTo)
+            if nTarget > 0
+                nValue := (oRepo:revenue(dFrom, dTo) / nTarget) * 100
+            endIf
+        case cId == "fat.backlog"
+            nValue := oRepo:backlog()
+        case cId == "fat.gross_profit"
+            nValue := tdash.fat.u_resultSum(::resultRows(dFrom, dTo), ::lReform)["gross"]
+        case cId == "fat.net_profit"
+            nValue := tdash.fat.u_resultSum(::resultRows(dFrom, dTo), ::lReform)["net"]
+        case cId == "fat.taxes"
+            nValue := tdash.fat.u_resultSum(::resultRows(dFrom, dTo), ::lReform)["taxes"]
+    endCase
+return nValue
+
+/*/{Protheus.doc} fatCatalog
+Catálogo do Faturamento: { id, tipos, título, unidade, sentido, ttl }.
+@type static function
+@author TDash
+@since 20/10/2026
+@return array, indicadores
+/*/
+static function fatCatalog() as array
+return {;
+    { "fat.revenue",            { "kpi", "series" }, "Faturamento bruto",       "BRL",   "up_is_good",   TTL_OP  },;
+    { "fat.revenue_net",        { "kpi" },           "Faturamento líquido",     "BRL",   "up_is_good",   TTL_TAT },;
+    { "fat.invoice_count",      { "kpi" },           "Notas fiscais emitidas",  "COUNT", "up_is_good",   TTL_OP  },;
+    { "fat.avg_ticket",         { "kpi" },           "Ticket médio por nota",   "BRL",   "up_is_good",   TTL_TAT },;
+    { "fat.returns",            { "kpi" },           "Devoluções",              "BRL",   "down_is_good", TTL_TAT },;
+    { "fat.target_attainment",  { "kpi" },           "Meta x realizado",        "PCT",   "up_is_good",   TTL_TAT },;
+    { "fat.backlog",            { "kpi", "list" },   "Carteira de pedidos",     "BRL",   "up_is_good",   TTL_OP  },;
+    { "fat.top_customers",      { "breakdown" },     "Maiores clientes",        "BRL",   "neutral",      TTL_TAT },;
+    { "fat.top_products",       { "breakdown" },     "Produtos mais vendidos",  "BRL",   "neutral",      TTL_TAT },;
+    { "fat.by_seller",          { "breakdown" },     "Faturamento por vendedor", "BRL",  "neutral",      TTL_TAT },;
+    { "fat.by_state",           { "breakdown" },     "Faturamento por UF",      "BRL",   "neutral",      TTL_EST },;
+    { "fat.gross_profit",       { "kpi" },           "Lucro bruto",             "BRL",   "up_is_good",   TTL_TAT },;
+    { "fat.net_profit",         { "kpi" },           "Lucro líquido",           "BRL",   "up_is_good",   TTL_TAT },;
+    { "fat.taxes",              { "kpi" },           "Impostos sobre vendas",   "BRL",   "down_is_good", TTL_TAT },;
+    { "fat.result",             { "series" },        "Lucro bruto, lucro líquido e impostos", "BRL", "neutral", TTL_TAT },;
+    { "fat.taxes_by_type",      { "breakdown" },     "Impostos por tipo",       "BRL",   "neutral",      TTL_TAT } }

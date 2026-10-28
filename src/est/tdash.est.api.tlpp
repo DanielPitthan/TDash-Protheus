@@ -1,0 +1,473 @@
+#include 'tlpp-core.th'
+#include 'tlpp-rest.th'
+#include 'totvs.ch'
+
+// Validade das respostas (segundos): operacional, tático, estratégico
+#define TTL_OP  300
+#define TTL_TAT 1800
+#define TTL_EST 43200
+
+#define DEFAULT_TOP       10
+#define DEFAULT_PAGE_SIZE 20
+
+// Janelas fixas dos indicadores de consumo, giro e custo médio
+#define COVERAGE_DAYS 90
+#define TURNOVER_DAYS 365
+#define COST_PRODUCTS 5
+
+/*/{Protheus.doc} TDashEstApi
+APIs de negócio de Estoque e Custos para o TDash.
+Rotas: catalog, kpis, series/:id, breakdown/:id, list/:id (prefixo /tdash/v1/est).
+Indicadores e regras: docs/10-catalogo-de-indicadores.md (seção Estoque e Custos).
+Formato das respostas (o que o app espera): docs/02-contrato-de-resposta.md.
+@type class
+@author TDash
+@since 21/10/2026
+@version 1.0
+/*/
+namespace tdash.est
+
+class TDashEstApi
+    public method new()
+
+    @Get("/tdash/v1/est/catalog")
+    public method getCatalog()
+
+    @Get("/tdash/v1/est/kpis")
+    public method getKpis()
+
+    @Get("/tdash/v1/est/series/:id")
+    public method getSeries()
+
+    @Get("/tdash/v1/est/breakdown/:id")
+    public method getBreakdown()
+
+    @Get("/tdash/v1/est/list/:id")
+    public method getList()
+
+    private method kpiValue(cId as character, dFrom as date, dTo as date) as numeric
+endclass
+
+method new() class TDashEstApi
+return self
+
+/*/{Protheus.doc} getCatalog
+GET /tdash/v1/est/catalog
+@type method
+@author TDash
+@since 21/10/2026
+@return logical, sempre .T.
+/*/
+method getCatalog() class TDashEstApi
+    local oHelper := tdash.core.TDashResponseHelper():new() as object
+    local jBody   := jsonObject():new() as json
+
+    jBody["items"] := tdash.core.u_catalogItems(estCatalog())
+    oHelper:setCacheHeaders(TTL_EST)
+    oRest:setResponse(oHelper:getResponse(jBody))
+return .T.
+
+/*/{Protheus.doc} getKpis
+GET /tdash/v1/est/kpis?ids=a,b&dateFrom=AAAAMMDD&dateTo=AAAAMMDD&compare=none|prev|yoy
+Só o CMV (est.cogs) é de período e aceita comparação; os demais são posição de hoje ou janelas fixas.
+@type method
+@author TDash
+@since 21/10/2026
+@return logical, sempre .T.
+/*/
+method getKpis() class TDashEstApi
+    local oRequest := tdash.core.TDashRequest():new() as object
+    local oHelper  := tdash.core.TDashResponseHelper():new() as object
+    local oPeriod  := tdash.core.TDashPeriod():new() as object
+    local oRepo    := TDashEstRepository():new() as object
+    local jBody    := jsonObject():new() as json
+    local jItem    as json
+    local aIds     := {} as array
+    local aItems   := {} as array
+    local aDef     := {} as array
+    local lCompare := .F. as logical
+    local nTtl     := TTL_EST as numeric
+    local nValue   := 0 as numeric
+    local nPrev    := 0 as numeric
+    local nX       := 0 as numeric
+
+    aIds := StrTokArr2(oRequest:query("ids"), ",", .F.)
+    if Len(aIds) == 0 .or. Len(aIds) > 20
+        oHelper:badRequest("Informe de 1 a 20 indicadores em ids.")
+        return .T.
+    endIf
+
+    if !oPeriod:fromQuery(oRequest:query("dateFrom"), oRequest:query("dateTo"), oRequest:query("compare"), Date())
+        oHelper:badRequest(oPeriod:cError)
+        return .T.
+    endIf
+
+    for nX := 1 to Len(aIds)
+        if Len(tdash.core.u_findIndicator(estCatalog(), aIds[nX], "kpi")) == 0
+            oHelper:notFound(AllTrim(aIds[nX]), "est")
+            return .T.
+        endIf
+    next nX
+
+    TRY
+        for nX := 1 to Len(aIds)
+            aDef     := tdash.core.u_findIndicator(estCatalog(), aIds[nX], "kpi")
+            nValue   := ::kpiValue(aDef[1], oPeriod:dFrom, oPeriod:dTo)
+            lCompare := oPeriod:hasCompare() .and. aDef[1] == "est.cogs"
+            nPrev    := 0
+            if lCompare
+                nPrev := ::kpiValue(aDef[1], oPeriod:compareFrom(), oPeriod:compareTo())
+            endIf
+
+            jItem := tdash.core.u_kpiItem(aDef, nValue, lCompare, oPeriod:cCompare, nPrev, oHelper:timestamp())
+            // Sem base de cálculo o índice zerado não tem significado: o título avisa
+            if aDef[1] == "est.coverage_days" .and. nValue == 0 .and. oRepo:consumption(DaySub(Date(), COVERAGE_DAYS - 1), Date()) == 0
+                jItem["title"] := "Cobertura de estoque (sem consumo no período)"
+            endIf
+            if aDef[1] == "est.turnover" .and. nValue == 0 .and. oRepo:averageStock(DaySub(Date(), TURNOVER_DAYS), Date()) == 0
+                jItem["title"] := "Giro de estoque (sem fechamento no período)"
+            endIf
+
+            aAdd(aItems, jItem)
+            nTtl := Min(nTtl, aDef[6])
+        next nX
+
+        jBody["items"] := aItems
+        oHelper:setCacheHeaders(nTtl)
+        oRest:setResponse(oHelper:getResponse(jBody))
+    CATCH oError
+        oHelper:serverError("TDashEstApi:kpis", oError:description)
+    ENDTRY
+return .T.
+
+/*/{Protheus.doc} getSeries
+GET /tdash/v1/est/series/:id?dateFrom&dateTo&grain=day|week|month
+est.cogs: série "cogs" (CMV) no período. est.avg_cost_evolution: uma série por produto (sempre mensal),
+com o custo médio de cada fechamento dos produtos de maior valor em estoque.
+@type method
+@author TDash
+@since 21/10/2026
+@return logical, sempre .T.
+/*/
+method getSeries() class TDashEstApi
+    local oRequest := tdash.core.TDashRequest():new() as object
+    local oHelper  := tdash.core.TDashResponseHelper():new() as object
+    local oPeriod  := tdash.core.TDashPeriod():new() as object
+    local oRepo    := TDashEstRepository():new() as object
+    local jBody    := jsonObject():new() as json
+    local aDef     := {} as array
+    local aGroups  := {} as array
+    local aRows    := {} as array
+    local aSeries  := {} as array
+    local aPoints  := {} as array
+    local aValue   := {} as array
+    local aQty     := {} as array
+    local aKeys    := {} as array
+    local cId      := oRequest:path("id") as character
+    local cGrain   := Lower(oRequest:query("grain")) as character
+    local cLabel   := "" as character
+    local nQty     := 0 as numeric
+    local nX       := 0 as numeric
+    local nY       := 0 as numeric
+
+    aDef := tdash.core.u_findIndicator(estCatalog(), cId, "series")
+    if Len(aDef) == 0
+        oHelper:notFound(cId, "est")
+        return .T.
+    endIf
+
+    if Empty(cGrain)
+        cGrain := "day"
+    endIf
+    if AScan({ "day", "week", "month" }, {|x| x == cGrain}) == 0
+        oHelper:badRequest("grain inválido. Use day, week ou month.")
+        return .T.
+    endIf
+
+    if !oPeriod:fromQuery(oRequest:query("dateFrom"), oRequest:query("dateTo"), "none", Date())
+        oHelper:badRequest(oPeriod:cError)
+        return .T.
+    endIf
+
+    TRY
+        if cId == "est.cogs"
+            aGroups := tdash.core.u_groupRows(oRepo:cogsByDay(oPeriod:dFrom, oPeriod:dTo), cGrain)
+            for nX := 1 to Len(aGroups)
+                aAdd(aPoints, tdash.core.u_jsonPoint(aGroups[nX][1], aGroups[nX][2], "cogs"))
+            next nX
+            aSeries := { "cogs" }
+        else
+            // Custo médio = valor inicial / quantidade inicial do mês, por produto
+            cGrain := "month"
+            aRows  := oRepo:avgCostEvolution(oPeriod:dFrom, oPeriod:dTo, COST_PRODUCTS)
+            for nX := 1 to Len(aRows)
+                cLabel := aRows[nX][1] + " " + aRows[nX][2]
+                if AScan(aSeries, {|x| x == cLabel}) == 0
+                    aAdd(aSeries, cLabel)
+                endIf
+            next nX
+
+            for nX := 1 to Len(aSeries)
+                aValue := {}
+                aQty   := {}
+                for nY := 1 to Len(aRows)
+                    if aRows[nY][1] + " " + aRows[nY][2] == aSeries[nX]
+                        aAdd(aValue, { aRows[nY][3], aRows[nY][4] })
+                        aAdd(aQty,   { aRows[nY][3], aRows[nY][5] })
+                    endIf
+                next nY
+                aValue := tdash.core.u_groupRows(aValue, "month")
+                aQty   := tdash.core.u_groupRows(aQty, "month")
+                aKeys  := tdash.core.u_mergeKeys(aValue, aQty)
+                for nY := 1 to Len(aKeys)
+                    nQty := tdash.core.u_valueOf(aQty, aKeys[nY])
+                    if nQty > 0
+                        aAdd(aPoints, tdash.core.u_jsonPoint(aKeys[nY], tdash.core.u_valueOf(aValue, aKeys[nY]) / nQty, aSeries[nX]))
+                    endIf
+                next nY
+            next nX
+        endIf
+
+        jBody["id"]          := aDef[1]
+        jBody["unit"]        := aDef[4]
+        jBody["grain"]       := cGrain
+        jBody["series"]      := aSeries
+        jBody["points"]      := aPoints
+        jBody["generatedAt"] := oHelper:timestamp()
+        jBody["ttl"]         := aDef[6]
+
+        oHelper:setCacheHeaders(aDef[6])
+        oRest:setResponse(oHelper:getResponse(jBody))
+    CATCH oError
+        oHelper:serverError("TDashEstApi:series", oError:description)
+    ENDTRY
+return .T.
+
+/*/{Protheus.doc} getBreakdown
+GET /tdash/v1/est/breakdown/est.stock_value?dimension=local|type|group&top=10
+GET /tdash/v1/est/breakdown/est.abc_curve
+Valor em estoque por armazém, tipo ou grupo; e curva ABC (A 80%, B 15%, C 5% do valor em estoque).
+@type method
+@author TDash
+@since 21/10/2026
+@return logical, sempre .T.
+/*/
+method getBreakdown() class TDashEstApi
+    local oRequest := tdash.core.TDashRequest():new() as object
+    local oHelper  := tdash.core.TDashResponseHelper():new() as object
+    local oRepo    := TDashEstRepository():new() as object
+    local jBody    := jsonObject():new() as json
+    local aDef     := {} as array
+    local aItems   := {} as array
+    local cId      := oRequest:path("id") as character
+    local cDimension := Lower(oRequest:query("dimension")) as character
+    local nTop     := 0 as numeric
+
+    aDef := tdash.core.u_findIndicator(estCatalog(), cId, "breakdown")
+    if Len(aDef) == 0
+        oHelper:notFound(cId, "est")
+        return .T.
+    endIf
+
+    nTop := tdash.core.u_parseInt(oRequest:query("top"), DEFAULT_TOP, 1, 50)
+    if nTop < 0
+        oHelper:badRequest("top deve estar entre 1 e 50.")
+        return .T.
+    endIf
+
+    if Empty(cDimension)
+        cDimension := "local"
+    endIf
+    if cId == "est.stock_value" .and. AScan({ "local", "type", "group" }, {|x| x == cDimension}) == 0
+        oHelper:badRequest("dimension inválida. Use local, type ou group.")
+        return .T.
+    endIf
+
+    TRY
+        if cId == "est.abc_curve"
+            aItems := abcItems(oRepo:stockByProduct())
+        else
+            // Busca todas as linhas para somar o restante em "Outros"
+            aItems := tdash.core.u_rowsToItems(oRepo:stockValueBy(cDimension))
+            aItems := tdash.core.u_applyShares(tdash.core.u_topWithOthers(aItems, nTop, "Outros"))
+        endIf
+
+        jBody["id"]          := aDef[1]
+        jBody["unit"]        := aDef[4]
+        jBody["items"]       := aItems
+        jBody["generatedAt"] := oHelper:timestamp()
+        jBody["ttl"]         := aDef[6]
+
+        oHelper:setCacheHeaders(aDef[6])
+        oRest:setResponse(oHelper:getResponse(jBody))
+    CATCH oError
+        oHelper:serverError("TDashEstApi:breakdown", oError:description)
+    ENDTRY
+return .T.
+
+/*/{Protheus.doc} getList
+GET /tdash/v1/est/list/:id?page=1&pageSize=20
+est.below_reorder, est.no_movement e est.lots_expiring.
+@type method
+@author TDash
+@since 21/10/2026
+@return logical, sempre .T.
+/*/
+method getList() class TDashEstApi
+    local oRequest  := tdash.core.TDashRequest():new() as object
+    local oHelper   := tdash.core.TDashResponseHelper():new() as object
+    local oRepo     := TDashEstRepository():new() as object
+    local jBody     as json
+    local aDef      := {} as array
+    local aColumns  := {} as array
+    local cId       := oRequest:path("id") as character
+    local nPage     := 0 as numeric
+    local nPageSize := 0 as numeric
+
+    aDef := tdash.core.u_findIndicator(estCatalog(), cId, "list")
+    if Len(aDef) == 0
+        oHelper:notFound(cId, "est")
+        return .T.
+    endIf
+
+    nPage     := tdash.core.u_parseInt(oRequest:query("page"), 1, 1, 100000)
+    nPageSize := tdash.core.u_parseInt(oRequest:query("pageSize"), DEFAULT_PAGE_SIZE, 1, 100)
+    if nPage < 0 .or. nPageSize < 0
+        oHelper:badRequest("page deve ser maior que zero e pageSize entre 1 e 100.")
+        return .T.
+    endIf
+
+    TRY
+        do case
+            case cId == "est.below_reorder"
+                aAdd(aColumns, tdash.core.u_jsonColumn("document", "Produto", "text"))
+                aAdd(aColumns, tdash.core.u_jsonColumn("party", "Descrição", "text"))
+                aAdd(aColumns, tdash.core.u_jsonColumn("quantity", "Saldo", "QTY"))
+                aAdd(aColumns, tdash.core.u_jsonColumn("reorderPoint", "Ponto de pedido", "QTY"))
+                aAdd(aColumns, tdash.core.u_jsonColumn("shortage", "Falta", "QTY"))
+                jBody := oRepo:belowReorderItems(nPage, nPageSize)
+            case cId == "est.no_movement"
+                aAdd(aColumns, tdash.core.u_jsonColumn("document", "Produto", "text"))
+                aAdd(aColumns, tdash.core.u_jsonColumn("party", "Descrição", "text"))
+                aAdd(aColumns, tdash.core.u_jsonColumn("warehouse", "Armazém", "text"))
+                aAdd(aColumns, tdash.core.u_jsonColumn("lastMove", "Última movimentação", "date"))
+                aAdd(aColumns, tdash.core.u_jsonColumn("quantity", "Saldo", "QTY"))
+                aAdd(aColumns, tdash.core.u_jsonColumn("balance", "Valor parado", "BRL"))
+                jBody := oRepo:noMovementItems(DaySub(Date(), paramDays("MV_TDSEMMV", 180)), nPage, nPageSize)
+            otherwise // est.lots_expiring
+                aAdd(aColumns, tdash.core.u_jsonColumn("document", "Lote", "text"))
+                aAdd(aColumns, tdash.core.u_jsonColumn("party", "Descrição", "text"))
+                aAdd(aColumns, tdash.core.u_jsonColumn("product", "Produto", "text"))
+                aAdd(aColumns, tdash.core.u_jsonColumn("dueDate", "Validade", "date"))
+                aAdd(aColumns, tdash.core.u_jsonColumn("quantity", "Saldo", "QTY"))
+                jBody := oRepo:lotsExpiringItems(DaySum(Date(), paramDays("MV_TDVALID", 30)), nPage, nPageSize)
+        endCase
+        jBody["columns"] := aColumns
+
+        oHelper:setCacheHeaders(aDef[6])
+        oRest:setResponse(oHelper:getResponse(jBody))
+    CATCH oError
+        oHelper:serverError("TDashEstApi:list", oError:description)
+    ENDTRY
+return .T.
+
+/*/{Protheus.doc} kpiValue
+Calcula o valor de um cartão.
+@type method
+@author TDash
+@since 21/10/2026
+@param cId, character, id do indicador
+@param dFrom, date, início do período (só est.cogs)
+@param dTo, date, fim do período (só est.cogs)
+@return numeric, valor
+/*/
+method kpiValue(cId as character, dFrom as date, dTo as date) as numeric class TDashEstApi
+    local oRepo  := TDashEstRepository():new() as object
+    local nValue := 0 as numeric
+    local nBase  := 0 as numeric
+
+    do case
+        case cId == "est.stock_value"
+            nValue := oRepo:stockValue()
+        case cId == "est.below_reorder"
+            nValue := oRepo:belowReorder()
+        case cId == "est.coverage_days"
+            // Estoque atual (quantidade) / consumo médio diário dos últimos 90 dias
+            nBase := oRepo:consumption(DaySub(Date(), COVERAGE_DAYS - 1), Date()) / COVERAGE_DAYS
+            if nBase > 0
+                nValue := oRepo:stockQuantity() / nBase
+            endIf
+        case cId == "est.turnover"
+            // CMV de 12 meses / estoque médio dos fechamentos do período
+            nBase := oRepo:averageStock(DaySub(Date(), TURNOVER_DAYS), Date())
+            if nBase > 0
+                nValue := oRepo:cogs(DaySub(Date(), TURNOVER_DAYS), Date()) / nBase
+            endIf
+        case cId == "est.no_movement"
+            nValue := oRepo:noMovement(DaySub(Date(), paramDays("MV_TDSEMMV", 180)))
+        case cId == "est.lots_expiring"
+            nValue := oRepo:lotsExpiring(DaySum(Date(), paramDays("MV_TDVALID", 30)))
+        case cId == "est.cogs"
+            nValue := oRepo:cogs(dFrom, dTo)
+    endCase
+return nValue
+
+/*/{Protheus.doc} abcItems
+Itens da curva ABC: classe, quantidade de produtos e valor em estoque de cada classe.
+@type static function
+@author TDash
+@since 21/10/2026
+@param aValues, array, valor em estoque de cada produto
+@return array, itens com participação
+/*/
+static function abcItems(aValues as array) as array
+    local aClasses := tdash.est.u_abcClassify(aValues) as array
+    local aLetters := { "A", "B", "C" } as array
+    local aItems   := {} as array
+    local cLabel   := "" as character
+    local nX       := 0 as numeric
+
+    for nX := 1 to 3
+        cLabel := "Classe " + aLetters[nX] + " (" + cValToChar(aClasses[nX][1]) + " itens)"
+        if aClasses[nX][1] == 1
+            cLabel := "Classe " + aLetters[nX] + " (1 item)"
+        endIf
+        aAdd(aItems, tdash.core.u_jsonItem(aLetters[nX], cLabel, aClasses[nX][2]))
+    next nX
+return tdash.core.u_applyShares(aItems)
+
+/*/{Protheus.doc} paramDays
+Lê um parâmetro de dias (SX6) com padrão no código; fora de 1 a 3650 volta ao padrão.
+@type static function
+@author TDash
+@since 21/10/2026
+@param cParam, character, nome do parâmetro (MV_TDSEMMV, MV_TDVALID)
+@param nDefault, numeric, padrão
+@return numeric, dias
+/*/
+static function paramDays(cParam as character, nDefault as numeric) as numeric
+    local nDays := Val(cValToChar(SuperGetMV(cParam, .F., nDefault))) as numeric
+
+    if nDays < 1 .or. nDays > 3650
+        nDays := nDefault
+    endIf
+return nDays
+
+/*/{Protheus.doc} estCatalog
+Catálogo de Estoque e Custos: { id, tipos, título, unidade, sentido, ttl }.
+@type static function
+@author TDash
+@since 21/10/2026
+@return array, indicadores
+/*/
+static function estCatalog() as array
+return {;
+    { "est.stock_value",        { "kpi", "breakdown" }, "Valor em estoque",              "BRL",   "neutral",      TTL_TAT },;
+    { "est.below_reorder",      { "kpi", "list" },      "Produtos abaixo do ponto de pedido", "COUNT", "down_is_good", TTL_OP  },;
+    { "est.coverage_days",      { "kpi" },              "Cobertura de estoque",          "DAYS",  "neutral",      TTL_EST },;
+    { "est.turnover",           { "kpi" },              "Giro de estoque",               "TIMES", "up_is_good",   TTL_EST },;
+    { "est.no_movement",        { "kpi", "list" },      "Itens sem movimento",           "COUNT", "down_is_good", TTL_EST },;
+    { "est.abc_curve",          { "breakdown" },        "Curva ABC do estoque",          "BRL",   "neutral",      TTL_EST },;
+    { "est.lots_expiring",      { "kpi", "list" },      "Lotes vencidos ou a vencer",    "COUNT", "down_is_good", TTL_OP  },;
+    { "est.cogs",               { "kpi", "series" },    "Custo da mercadoria vendida",   "BRL",   "neutral",      TTL_TAT },;
+    { "est.avg_cost_evolution", { "series" },           "Custo médio dos itens de maior valor", "BRL", "down_is_good", TTL_EST } }

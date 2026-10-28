@@ -1,0 +1,534 @@
+openapi: 3.0.3
+info:
+  title: TDash - APIs de dashboards Protheus
+  version: 1.1.0
+  description: |
+    APIs TLPP publicadas no REST do Protheus (12.1.2410+) para o app TDash.
+    Toda requisição exige Basic Auth e os headers `tenantid` e `x-erp-module`; o REST do Protheus valida
+    usuário, filial e módulo antes de chamar a API.
+    Contrato detalhado (o que o app faz com cada campo): docs/02-contrato-de-resposta.md.
+    Regras de cada indicador: docs/10-catalogo-de-indicadores.md.
+servers:
+  - url: '{baseUrl}/tdash/v1'
+    variables:
+      baseUrl:
+        default: https://cliente.protheus.cloudtotvs.com.br:1557/api
+security:
+  - basicAuth: []
+tags:
+  - name: core
+  - name: modules
+  - name: custom
+    description: Painéis personalizados (docs/09-painel-personalizado.md). O caminho é livre; estes são os exemplos.
+paths:
+  /core/branches:
+    get:
+      tags: [core]
+      summary: Empresas e filiais que o usuário pode consultar (também usada no login para validar a credencial)
+      parameters:
+        - $ref: '#/components/parameters/TenantIdOptional'
+        - $ref: '#/components/parameters/ErpModuleCore'
+      responses:
+        '200':
+          description: Lista de filiais
+          headers:
+            Cache-Control: { $ref: '#/components/headers/CacheControl' }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Branch' }
+        '500': { $ref: '#/components/responses/Error' }
+  /core/modules:
+    get:
+      tags: [core]
+      summary: Módulos do TDash e se o usuário pode vê-los (aba Menus do cadastro do usuário e dos grupos)
+      description: |
+        Filtro de exibição do app, chamado no login depois de /core/branches. Não substitui a validação
+        do REST, que continua conferindo usuário, filial e módulo em cada chamada.
+      parameters:
+        - $ref: '#/components/parameters/TenantIdOptional'
+        - $ref: '#/components/parameters/ErpModuleCore'
+      responses:
+        '200':
+          description: Os oito módulos, cada um com allowed
+          headers:
+            Cache-Control: { $ref: '#/components/headers/CacheControl' }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      required: [code, allowed]
+                      properties:
+                        code: { type: string, enum: [FIN, COM, FAT, PCP, EST, GPE, CTB, FIS] }
+                        allowed: { type: boolean }
+                  ttl: { type: integer, example: 300 }
+        '500': { $ref: '#/components/responses/Error' }
+  /custom/mock:
+    get:
+      tags: [custom]
+      summary: Painel personalizado de exemplo com dados fictícios (modelo para copiar)
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - { name: x-erp-module, in: header, required: true, description: Módulo escolhido no cadastro do painel no app, schema: { type: string, example: FAT } }
+        - { name: dateFrom, in: query, required: false, schema: { type: string, example: '20261001' } }
+        - { name: dateTo, in: query, required: false, schema: { type: string, example: '20261023' } }
+      responses:
+        '200':
+          description: Painel
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CustomPanel' }
+        '400': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+  /custom/exemplo:
+    get:
+      tags: [custom]
+      summary: Painel personalizado de exemplo com as consultas do Faturamento
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - { name: x-erp-module, in: header, required: true, schema: { type: string, example: FAT } }
+        - { name: dateFrom, in: query, required: false, schema: { type: string, example: '20261001' } }
+        - { name: dateTo, in: query, required: false, schema: { type: string, example: '20261023' } }
+      responses:
+        '200':
+          description: Painel
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CustomPanel' }
+        '400': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+  /{module}/catalog:
+    get:
+      tags: [modules]
+      summary: Indicadores publicados pelo módulo (não usada pelo app; serve para conferência)
+      parameters:
+        - $ref: '#/components/parameters/Module'
+        - $ref: '#/components/parameters/TenantId'
+        - $ref: '#/components/parameters/ErpModule'
+      responses:
+        '200':
+          description: Catálogo
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/IndicatorDef' }
+  /{module}/kpis:
+    get:
+      tags: [modules]
+      summary: Valores de um ou mais cartões de KPI
+      description: |
+        Um id fora do catálogo do módulo faz a chamada inteira responder 404.
+        gpe.overtime e gpe.overtime_hours exigem overtimeCodes (sem eles, 422).
+      parameters:
+        - $ref: '#/components/parameters/Module'
+        - $ref: '#/components/parameters/TenantId'
+        - $ref: '#/components/parameters/ErpModule'
+        - name: ids
+          in: query
+          required: true
+          description: Ids separados por vírgula (de 1 a 20)
+          schema: { type: string, example: 'fin.receivable_open,fin.receivable_overdue' }
+        - $ref: '#/components/parameters/DateFrom'
+        - $ref: '#/components/parameters/DateTo'
+        - $ref: '#/components/parameters/Compare'
+        - $ref: '#/components/parameters/OvertimeCodes'
+      responses:
+        '200':
+          description: Valores
+          headers:
+            Cache-Control: { $ref: '#/components/headers/CacheControl' }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/KpiValue' }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+  /{module}/series/{id}:
+    get:
+      tags: [modules]
+      summary: Série temporal de um indicador
+      description: |
+        Sem datas, fin.cashflow_projection usa de hoje até hoje + 30 dias. As séries do RH são sempre mensais
+        (competências fechadas na folha). gpe.overtime exige overtimeCodes.
+      parameters:
+        - $ref: '#/components/parameters/Module'
+        - $ref: '#/components/parameters/IndicatorId'
+        - $ref: '#/components/parameters/TenantId'
+        - $ref: '#/components/parameters/ErpModule'
+        - $ref: '#/components/parameters/DateFrom'
+        - $ref: '#/components/parameters/DateTo'
+        - name: grain
+          in: query
+          schema: { type: string, enum: [day, week, month], default: day }
+        - $ref: '#/components/parameters/OvertimeCodes'
+      responses:
+        '200':
+          description: Série
+          headers:
+            Cache-Control: { $ref: '#/components/headers/CacheControl' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Series' }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+  /{module}/breakdown/{id}:
+    get:
+      tags: [modules]
+      summary: Composição ou ranking de um indicador; na Contabilidade, DRE e Balanço
+      description: |
+        Contabilidade (ctb.income_statement, ctb.balance_sheet): exige view; o período vale por meses inteiros e a
+        resposta traz dateFrom/dateTo (e compareFrom/compareTo com comparação). Sem visão ou com visão inexistente: 422.
+        RH: grupos com menos de MV_TDMINGR pessoas vão para "Outros"; total abaixo do mínimo devolve items vazio e
+        um aviso em warnings.
+      parameters:
+        - $ref: '#/components/parameters/Module'
+        - $ref: '#/components/parameters/IndicatorId'
+        - $ref: '#/components/parameters/TenantId'
+        - $ref: '#/components/parameters/ErpModule'
+        - $ref: '#/components/parameters/DateFrom'
+        - $ref: '#/components/parameters/DateTo'
+        - name: top
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50, default: 10 }
+        - name: dimension
+          in: query
+          description: |
+            Quebra, quando o indicador tem mais de uma: est.stock_value (local, type, group),
+            gpe.headcount (cc, role), gpe.demographics (age, tenure, sex)
+          schema: { type: string }
+        - $ref: '#/components/parameters/View'
+        - $ref: '#/components/parameters/Compare'
+      responses:
+        '200':
+          description: Composição
+          headers:
+            Cache-Control: { $ref: '#/components/headers/CacheControl' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Breakdown' }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+  /{module}/list/{id}:
+    get:
+      tags: [modules]
+      summary: Lista paginada para detalhamento
+      description: |
+        dateFrom/dateTo só valem para listas de período (fis.cancelled, fis.ledger). ctb.view_lines exige view.
+        fis.ledger aceita scope=branch (padrão, filial do app) ou scope=all (todas as filiais liberadas ao usuário,
+        uma coluna b_<filial> por filial) e devolve sempre uma página só.
+        Não existe lista de pessoas no RH.
+      parameters:
+        - $ref: '#/components/parameters/Module'
+        - $ref: '#/components/parameters/IndicatorId'
+        - $ref: '#/components/parameters/TenantId'
+        - $ref: '#/components/parameters/ErpModule'
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: pageSize
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - $ref: '#/components/parameters/DateFrom'
+        - $ref: '#/components/parameters/DateTo'
+        - $ref: '#/components/parameters/View'
+        - name: scope
+          in: query
+          description: Só fis.ledger. branch = filial do app; all = todas as filiais liberadas ao usuário.
+          schema: { type: string, enum: [branch, all], default: branch }
+      responses:
+        '200':
+          description: Página
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ListPage' }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+components:
+  securitySchemes:
+    basicAuth:
+      type: http
+      scheme: basic
+  parameters:
+    Module:
+      name: module
+      in: path
+      required: true
+      schema: { type: string, enum: [fin, com, fat, pcp, est, gpe, ctb, fis] }
+    IndicatorId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, example: fin.cashflow_projection }
+    TenantId:
+      name: tenantid
+      in: header
+      required: true
+      description: '"{empresa},{filial}", com o código da filial exatamente como veio de /core/branches'
+      schema: { type: string, example: '01,1001' }
+    TenantIdOptional:
+      name: tenantid
+      in: header
+      required: false
+      description: |
+        Opcional nas rotas /core: no login ainda não há filial escolhida e o REST usa a primeira
+        filial válida do usuário. Quando enviado, "{empresa},{filial}".
+      schema: { type: string, example: '01,1001' }
+    ErpModule:
+      name: x-erp-module
+      in: header
+      required: true
+      description: Deve corresponder ao módulo da rota
+      schema: { type: string, enum: [FIN, COM, FAT, PCP, EST, GPE, CTB, FIS] }
+    ErpModuleCore:
+      name: x-erp-module
+      in: header
+      required: true
+      description: Módulo usado para abrir o ambiente nas rotas do núcleo
+      schema: { type: string, enum: [FAT], default: FAT }
+    DateFrom:
+      name: dateFrom
+      in: query
+      description: AAAAMMDD. Padrão = primeiro dia do mês corrente
+      schema: { type: string, pattern: '^\d{8}$' }
+    DateTo:
+      name: dateTo
+      in: query
+      description: AAAAMMDD. Padrão = data do servidor. dateFrom <= dateTo e no máximo 24 meses
+      schema: { type: string, pattern: '^\d{8}$' }
+    Compare:
+      name: compare
+      in: query
+      description: prev = período anterior com a mesma quantidade de dias; yoy = mesmas datas do ano anterior
+      schema: { type: string, enum: [none, prev, yoy], default: none }
+    View:
+      name: view
+      in: query
+      description: Código da visão gerencial (CTS_CODPLA, 3 caracteres), escolhido pelo usuário no app
+      schema: { type: string, maxLength: 3, example: '100' }
+    OvertimeCodes:
+      name: overtimeCodes
+      in: query
+      description: Verbas de hora extra (RV_COD, 3 caracteres cada, até 30), escolhidas pelo usuário no app
+      schema: { type: string, example: '179,181,184' }
+  headers:
+    CacheControl:
+      description: private, max-age={ttl}. O app usa o campo ttl do corpo; o header serve a outros consumidores
+      schema: { type: string }
+  responses:
+    Error:
+      description: Erro no modelo TOTVS; o app mostra o campo message
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  schemas:
+    CustomPanel:
+      type: object
+      description: Painel personalizado. O app mostra os widgets na ordem da lista.
+      required: [widgets]
+      properties:
+        title: { type: string }
+        ttl: { type: integer, description: Segundos de cache no app (padrão 300) }
+        generatedAt: { type: string, example: '2026-10-23T14:32:05' }
+        widgets:
+          type: array
+          items: { $ref: '#/components/schemas/CustomWidget' }
+    CustomWidget:
+      type: object
+      required: [type]
+      properties:
+        type: { type: string, enum: [kpi, columnChart, barChart, table] }
+        name: { type: string }
+        value: { type: number, description: 'kpi: valor (obrigatório)' }
+        target: { type: number, description: 'kpi: meta (opcional)' }
+        unit: { type: string, enum: [BRL, PCT, DAYS, HOURS, TIMES, PER_HOUR, QTY, COUNT, ''] }
+        direction: { type: string, enum: [up_is_good, down_is_good, neutral] }
+        axisX: { type: string }
+        axisY: { type: string }
+        categories: { type: array, items: { type: string }, description: 'columnChart/barChart: rótulos das categorias' }
+        series:
+          type: array
+          description: 'columnChart/barChart: um valor por categoria'
+          items:
+            type: object
+            required: [name, data]
+            properties:
+              name: { type: string }
+              data: { type: array, items: { type: number } }
+        columns:
+          type: array
+          description: 'table: { label, unit } ou só o rótulo'
+          items:
+            oneOf:
+              - type: string
+              - type: object
+                properties:
+                  label: { type: string }
+                  unit: { type: string }
+        data:
+          type: array
+          description: 'table: linhas'
+          items:
+            type: array
+            items:
+              oneOf: [ { type: string }, { type: number } ]
+    Branch:
+      type: object
+      required: [company, branch, name]
+      properties:
+        company: { type: string, example: '01' }
+        branch: { type: string, example: '1001', description: Código da filial sem aparar espaços }
+        name: { type: string }
+        companyName: { type: string }
+        cnpj: { type: string }
+    IndicatorDef:
+      type: object
+      required: [id, kinds, title, unit, direction, ttl]
+      properties:
+        id: { type: string }
+        kinds:
+          description: Rotas em que o indicador está disponível
+          type: array
+          items: { type: string, enum: [kpi, series, breakdown, list] }
+        title: { type: string }
+        unit: { $ref: '#/components/schemas/Unit' }
+        direction: { $ref: '#/components/schemas/Direction' }
+        ttl: { type: integer, description: segundos }
+    KpiValue:
+      type: object
+      required: [id, title, unit, direction, value, compare, generatedAt, ttl]
+      properties:
+        id: { type: string }
+        title: { type: string, description: Exibido no cartão como veio }
+        unit: { $ref: '#/components/schemas/Unit' }
+        direction: { $ref: '#/components/schemas/Direction' }
+        value: { type: number, description: Arredondado em 2 casas; percentual de 0 a 100 }
+        compare:
+          type: object
+          nullable: true
+          required: [mode, value, deltaPct]
+          properties:
+            mode: { type: string, enum: [prev, yoy] }
+            value: { type: number }
+            deltaPct: { type: number, nullable: true, description: null quando a base é zero }
+        generatedAt: { type: string, example: '2026-10-21T10:15:00' }
+        ttl: { type: integer, description: segundos }
+        hidden: { type: boolean, default: false, description: 'LGPD (RH): true = o app mostra "—" e não o valor' }
+    Series:
+      type: object
+      required: [id, unit, grain, points, generatedAt, ttl]
+      properties:
+        id: { type: string }
+        unit: { $ref: '#/components/schemas/Unit' }
+        grain: { type: string, enum: [day, week, month] }
+        series:
+          description: Nomes das séries (obrigatório nas séries por produto)
+          type: array
+          items: { type: string }
+        points:
+          type: array
+          items: { $ref: '#/components/schemas/Point' }
+        warnings:
+          description: Avisos (ex.: fat.result, meses com custo incompleto)
+          type: array
+          items: { type: string }
+        generatedAt: { type: string, example: '2026-10-21T10:15:00' }
+        ttl: { type: integer }
+    Point:
+      type: object
+      required: [x, y, s]
+      properties:
+        x: { type: string, description: 'AAAA-MM-DD (day, week = segunda-feira) ou AAAA-MM (month)', example: '2026-10' }
+        y: { type: number }
+        s: { type: string, description: Nome da série; precisa ser o nome que a tela do app procura }
+    Breakdown:
+      type: object
+      required: [id, unit, items, generatedAt, ttl]
+      properties:
+        id: { type: string }
+        unit: { $ref: '#/components/schemas/Unit' }
+        items:
+          type: array
+          description: Na ordem de exibição; "others" é a chave do grupo "Outros"
+          items:
+            type: object
+            required: [key, label, value, share]
+            properties:
+              key: { type: string }
+              label: { type: string }
+              value: { type: number }
+              share: { type: number, description: '0 a 1 (não usado pelo app hoje)' }
+              level: { type: integer, description: Só demonstrações da Contabilidade }
+              kind: { type: string, enum: [detail, subtotal, total], description: Só demonstrações da Contabilidade }
+              previous: { type: number, nullable: true, description: Só demonstrações com comparação }
+        warnings:
+          type: array
+          items: { type: string }
+        dateFrom: { type: string, format: date, description: Período efetivo (meses inteiros) }
+        dateTo: { type: string, format: date }
+        compareFrom: { type: string, format: date }
+        compareTo: { type: string, format: date }
+        generatedAt: { type: string, example: '2026-10-21T10:15:00' }
+        ttl: { type: integer }
+    ListPage:
+      type: object
+      required: [columns, items, total, hasNext]
+      properties:
+        columns:
+          type: array
+          items:
+            type: object
+            required: [key, label, type]
+            properties:
+              key: { type: string, description: '"document" e "party" formam o título do cartão' }
+              label: { type: string }
+              type: { type: string, enum: [text, date, BRL, QTY, PCT, DAYS, HOURS, PER_HOUR, COUNT] }
+        items:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        total: { type: integer }
+        hasNext: { type: boolean }
+    Unit:
+      type: string
+      enum: [BRL, QTY, PCT, DAYS, HOURS, PER_HOUR, TIMES, COUNT]
+    Direction:
+      type: string
+      enum: [up_is_good, down_is_good, neutral]
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string, enum: [TDASH-400-PARAM, TDASH-404-INDICATOR, TDASH-422-CONFIG, TDASH-500] }
+        message: { type: string, description: Exibida ao usuário }
+        detailedMessage: { type: string }
+        helpUrl: { type: string }

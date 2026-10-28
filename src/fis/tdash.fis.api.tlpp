@@ -1,0 +1,508 @@
+#include 'tlpp-core.th'
+#include 'tlpp-rest.th'
+#include 'totvs.ch'
+
+// Validade das respostas (segundos): operacional, tático, estratégico
+#define TTL_OP  300
+#define TTL_TAT 1800
+#define TTL_EST 43200
+
+#define DEFAULT_TOP       10
+#define DEFAULT_PAGE_SIZE 20
+
+/*/{Protheus.doc} TDashFisApi
+APIs de negócio de Livros Fiscais para o TDash.
+Rotas: catalog, kpis, series/:id, breakdown/:id, list/:id (prefixo /tdash/v1/fis).
+Indicadores e regras: docs/10-catalogo-de-indicadores.md (seção Livros Fiscais).
+Formato das respostas (o que o app espera): docs/02-contrato-de-resposta.md.
+@type class
+@author TDash
+@since 21/10/2026
+@version 1.0
+/*/
+namespace tdash.fis
+
+class TDashFisApi
+    public method new()
+
+    @Get("/tdash/v1/fis/catalog")
+    public method getCatalog()
+
+    @Get("/tdash/v1/fis/kpis")
+    public method getKpis()
+
+    @Get("/tdash/v1/fis/series/:id")
+    public method getSeries()
+
+    @Get("/tdash/v1/fis/breakdown/:id")
+    public method getBreakdown()
+
+    @Get("/tdash/v1/fis/list/:id")
+    public method getList()
+
+    private data cLedgerKey as character
+    private data aLedger    as array
+
+    private method kpiValue(cId as character, dFrom as date, dTo as date) as numeric
+    private method ledger(dFrom as date, dTo as date) as array
+    private method ledgerList(cScope as character, dFrom as date, dTo as date) as json
+endclass
+
+method new() class TDashFisApi
+    ::cLedgerKey := ""
+    ::aLedger    := {}
+return self
+
+/*/{Protheus.doc} ledger
+Centralização da filial do app por mês, guardada para não repetir as consultas na mesma requisição (os cartões, a
+série e a tabela usam o mesmo resultado).
+@type method
+@author TDash
+@since 27/10/2026
+@param dFrom, date, início
+@param dTo, date, fim
+@return array, linhas por mês de TDashFisRepository:ledgerMonths
+/*/
+method ledger(dFrom as date, dTo as date) as array class TDashFisApi
+    local cKey := cFilAnt + DToS(dFrom) + DToS(dTo) as character
+    local oRepo as object
+
+    if !(::cLedgerKey == cKey)
+        oRepo        := TDashFisRepository():new()
+        ::aLedger    := oRepo:ledgerMonths(cFilAnt, dFrom, dTo)
+        ::cLedgerKey := cKey
+    endIf
+return ::aLedger
+
+/*/{Protheus.doc} getCatalog
+GET /tdash/v1/fis/catalog
+@type method
+@author TDash
+@since 21/10/2026
+@return logical, sempre .T.
+/*/
+method getCatalog() class TDashFisApi
+    local oHelper := tdash.core.TDashResponseHelper():new() as object
+    local jBody   := jsonObject():new() as json
+
+    jBody["items"] := tdash.core.u_catalogItems(fisCatalog())
+    oHelper:setCacheHeaders(TTL_EST)
+    oRest:setResponse(oHelper:getResponse(jBody))
+return .T.
+
+/*/{Protheus.doc} getKpis
+GET /tdash/v1/fis/kpis?ids=a,b&dateFrom=AAAAMMDD&dateTo=AAAAMMDD&compare=none|prev|yoy
+Todos os indicadores são de período e aceitam comparação.
+@type method
+@author TDash
+@since 21/10/2026
+@return logical, sempre .T.
+/*/
+method getKpis() class TDashFisApi
+    local oRequest := tdash.core.TDashRequest():new() as object
+    local oHelper  := tdash.core.TDashResponseHelper():new() as object
+    local oPeriod  := tdash.core.TDashPeriod():new() as object
+    local jBody    := jsonObject():new() as json
+    local aIds     := {} as array
+    local aItems   := {} as array
+    local aDef     := {} as array
+    local nTtl     := TTL_EST as numeric
+    local nValue   := 0 as numeric
+    local nPrev    := 0 as numeric
+    local nX       := 0 as numeric
+
+    aIds := StrTokArr2(oRequest:query("ids"), ",", .F.)
+    if Len(aIds) == 0 .or. Len(aIds) > 20
+        oHelper:badRequest("Informe de 1 a 20 indicadores em ids.")
+        return .T.
+    endIf
+
+    if !oPeriod:fromQuery(oRequest:query("dateFrom"), oRequest:query("dateTo"), oRequest:query("compare"), Date())
+        oHelper:badRequest(oPeriod:cError)
+        return .T.
+    endIf
+
+    for nX := 1 to Len(aIds)
+        if Len(tdash.core.u_findIndicator(fisCatalog(), aIds[nX], "kpi")) == 0
+            oHelper:notFound(AllTrim(aIds[nX]), "fis")
+            return .T.
+        endIf
+    next nX
+
+    TRY
+        for nX := 1 to Len(aIds)
+            aDef   := tdash.core.u_findIndicator(fisCatalog(), aIds[nX], "kpi")
+            nValue := ::kpiValue(aDef[1], oPeriod:dFrom, oPeriod:dTo)
+            nPrev  := 0
+            if oPeriod:hasCompare()
+                nPrev := ::kpiValue(aDef[1], oPeriod:compareFrom(), oPeriod:compareTo())
+            endIf
+
+            aAdd(aItems, tdash.core.u_kpiItem(aDef, nValue, oPeriod:hasCompare(), oPeriod:cCompare, nPrev, oHelper:timestamp()))
+            nTtl := Min(nTtl, aDef[6])
+        next nX
+
+        jBody["items"] := aItems
+        oHelper:setCacheHeaders(nTtl)
+        oRest:setResponse(oHelper:getResponse(jBody))
+    CATCH oError
+        oHelper:serverError("TDashFisApi:kpis", oError:description)
+    ENDTRY
+return .T.
+
+/*/{Protheus.doc} getSeries
+GET /tdash/v1/fis/series/:id?dateFrom&dateTo
+Débito e crédito do imposto por mês: séries "debit" (saídas) e "credit" (entradas). A série é sempre mensal.
+fis.ledger_trend: débitos e créditos de todos os tributos da centralização que entram no total (sem CBS e IBS).
+@type method
+@author TDash
+@since 21/10/2026
+@return logical, sempre .T.
+/*/
+method getSeries() class TDashFisApi
+    local oRequest := tdash.core.TDashRequest():new() as object
+    local oHelper  := tdash.core.TDashResponseHelper():new() as object
+    local oPeriod  := tdash.core.TDashPeriod():new() as object
+    local oRepo    := TDashFisRepository():new() as object
+    local jBody    := jsonObject():new() as json
+    local aDef     := {} as array
+    local aRows    := {} as array
+    local aDebit   := {} as array
+    local aCredit  := {} as array
+    local aKeys    := {} as array
+    local aPoints  := {} as array
+    local aMonths  := {} as array
+    local jTotals  as json
+    local cId      := oRequest:path("id") as character
+    local cTax     := "" as character
+    local nX       := 0 as numeric
+
+    aDef := tdash.core.u_findIndicator(fisCatalog(), cId, "series")
+    if Len(aDef) == 0
+        oHelper:notFound(cId, "fis")
+        return .T.
+    endIf
+
+    if !oPeriod:fromQuery(oRequest:query("dateFrom"), oRequest:query("dateTo"), "none", Date())
+        oHelper:badRequest(oPeriod:cError)
+        return .T.
+    endIf
+
+    do case
+        case cId == "fis.ipi_balance"
+            cTax := "ipi"
+        case cId == "fis.pis_cofins"
+            cTax := "pis_cofins"
+        otherwise
+            cTax := "icms"
+    endCase
+
+    TRY
+        if cId == "fis.ledger_trend"
+            // A centralização já vem por mês
+            aMonths := ::ledger(oPeriod:dFrom, oPeriod:dTo)
+            for nX := 1 to Len(aMonths)
+                jTotals := tdash.fis.u_ledgerTotals(aMonths[nX])
+                aAdd(aDebit,  { aMonths[nX]["month"], jTotals["debit"] })
+                aAdd(aCredit, { aMonths[nX]["month"], jTotals["credit"] })
+                aAdd(aKeys, aMonths[nX]["month"])
+            next nX
+        else
+            aRows := oRepo:taxByDay(cTax, oPeriod:dFrom, oPeriod:dTo)
+            for nX := 1 to Len(aRows)
+                aAdd(aDebit,  { aRows[nX][1], aRows[nX][2] })
+                aAdd(aCredit, { aRows[nX][1], aRows[nX][3] })
+            next nX
+            aDebit  := tdash.core.u_groupRows(aDebit, "month")
+            aCredit := tdash.core.u_groupRows(aCredit, "month")
+            aKeys   := tdash.core.u_mergeKeys(aDebit, aCredit)
+        endIf
+        for nX := 1 to Len(aKeys)
+            aAdd(aPoints, tdash.core.u_jsonPoint(aKeys[nX], tdash.core.u_valueOf(aDebit, aKeys[nX]), "debit"))
+            aAdd(aPoints, tdash.core.u_jsonPoint(aKeys[nX], tdash.core.u_valueOf(aCredit, aKeys[nX]), "credit"))
+        next nX
+
+        jBody["id"]          := aDef[1]
+        jBody["unit"]        := aDef[4]
+        jBody["grain"]       := "month"
+        jBody["series"]      := { "debit", "credit" }
+        jBody["points"]      := aPoints
+        jBody["generatedAt"] := oHelper:timestamp()
+        jBody["ttl"]         := aDef[6]
+
+        oHelper:setCacheHeaders(aDef[6])
+        oRest:setResponse(oHelper:getResponse(jBody))
+    CATCH oError
+        oHelper:serverError("TDashFisApi:series", oError:description)
+    ENDTRY
+return .T.
+
+/*/{Protheus.doc} getBreakdown
+GET /tdash/v1/fis/breakdown/:id?top=10&dateFrom&dateTo
+fis.by_cfop: valor contábil por CFOP. fis.by_state / fis.by_state_in: valor contábil das saídas / entradas por UF.
+fis.top_parties: clientes e fornecedores pelo total de tributos. fis.top_ncm: NCM das saídas pelo total de tributos.
+@type method
+@author TDash
+@since 21/10/2026
+@return logical, sempre .T.
+/*/
+method getBreakdown() class TDashFisApi
+    local oRequest := tdash.core.TDashRequest():new() as object
+    local oHelper  := tdash.core.TDashResponseHelper():new() as object
+    local oPeriod  := tdash.core.TDashPeriod():new() as object
+    local oRepo    := TDashFisRepository():new() as object
+    local jBody    := jsonObject():new() as json
+    local aDef     := {} as array
+    local aItems   := {} as array
+    local cId      := oRequest:path("id") as character
+    local nTop     := 0 as numeric
+
+    aDef := tdash.core.u_findIndicator(fisCatalog(), cId, "breakdown")
+    if Len(aDef) == 0
+        oHelper:notFound(cId, "fis")
+        return .T.
+    endIf
+
+    nTop := tdash.core.u_parseInt(oRequest:query("top"), DEFAULT_TOP, 1, 50)
+    if nTop < 0
+        oHelper:badRequest("top deve estar entre 1 e 50.")
+        return .T.
+    endIf
+
+    if !oPeriod:fromQuery(oRequest:query("dateFrom"), oRequest:query("dateTo"), "none", Date())
+        oHelper:badRequest(oPeriod:cError)
+        return .T.
+    endIf
+
+    TRY
+        // Busca todas as linhas para somar o restante em "Outros"
+        do case
+            case cId == "fis.by_state"
+                aItems := tdash.core.u_rowsToItems(oRepo:byState(oPeriod:dFrom, oPeriod:dTo, .F.))
+            case cId == "fis.by_state_in"
+                aItems := tdash.core.u_rowsToItems(oRepo:byState(oPeriod:dFrom, oPeriod:dTo, .T.))
+            case cId == "fis.top_parties"
+                aItems := tdash.core.u_rowsToItems(oRepo:topParties(oPeriod:dFrom, oPeriod:dTo, nTop))
+            case cId == "fis.top_ncm"
+                aItems := tdash.core.u_rowsToItems(oRepo:topNcm(oPeriod:dFrom, oPeriod:dTo))
+            otherwise
+                aItems := tdash.core.u_rowsToItems(oRepo:byCfop(oPeriod:dFrom, oPeriod:dTo))
+        endCase
+        aItems := tdash.core.u_topWithOthers(aItems, nTop, "Outros")
+
+        jBody["id"]          := aDef[1]
+        jBody["unit"]        := aDef[4]
+        jBody["items"]       := tdash.core.u_applyShares(aItems)
+        jBody["generatedAt"] := oHelper:timestamp()
+        jBody["ttl"]         := aDef[6]
+
+        oHelper:setCacheHeaders(aDef[6])
+        oRest:setResponse(oHelper:getResponse(jBody))
+    CATCH oError
+        oHelper:serverError("TDashFisApi:breakdown", oError:description)
+    ENDTRY
+return .T.
+
+/*/{Protheus.doc} getList
+GET /tdash/v1/fis/list/fis.cancelled?dateFrom&dateTo&page=1&pageSize=20
+Notas fiscais canceladas no período (pela data de cancelamento).
+GET /tdash/v1/fis/list/fis.ledger?dateFrom&dateTo&scope=branch|all
+Centralização de débitos e créditos: scope=branch (padrão) é a filial do app com débito, crédito, saldo e situação;
+scope=all traz o saldo de cada filial liberada ao usuário (na empresa do app) e a soma. Sempre uma página só.
+@type method
+@author TDash
+@since 21/10/2026
+@return logical, sempre .T.
+/*/
+method getList() class TDashFisApi
+    local oRequest  := tdash.core.TDashRequest():new() as object
+    local oHelper   := tdash.core.TDashResponseHelper():new() as object
+    local oPeriod   := tdash.core.TDashPeriod():new() as object
+    local oRepo     := TDashFisRepository():new() as object
+    local jBody     as json
+    local aDef      := {} as array
+    local aColumns  := {} as array
+    local cId       := oRequest:path("id") as character
+    local cScope    := Lower(AllTrim(oRequest:query("scope"))) as character
+    local nPage     := 0 as numeric
+    local nPageSize := 0 as numeric
+
+    aDef := tdash.core.u_findIndicator(fisCatalog(), cId, "list")
+    if Len(aDef) == 0
+        oHelper:notFound(cId, "fis")
+        return .T.
+    endIf
+
+    nPage     := tdash.core.u_parseInt(oRequest:query("page"), 1, 1, 100000)
+    nPageSize := tdash.core.u_parseInt(oRequest:query("pageSize"), DEFAULT_PAGE_SIZE, 1, 100)
+    if nPage < 0 .or. nPageSize < 0
+        oHelper:badRequest("page deve ser maior que zero e pageSize entre 1 e 100.")
+        return .T.
+    endIf
+
+    if !oPeriod:fromQuery(oRequest:query("dateFrom"), oRequest:query("dateTo"), "none", Date())
+        oHelper:badRequest(oPeriod:cError)
+        return .T.
+    endIf
+
+    if Empty(cScope)
+        cScope := "branch"
+    endIf
+    if cId == "fis.ledger" .and. AScan({ "branch", "all" }, {|x| x == cScope}) == 0
+        oHelper:badRequest("scope inválido. Use branch ou all.")
+        return .T.
+    endIf
+
+    TRY
+        if cId == "fis.ledger"
+            jBody := ::ledgerList(cScope, oPeriod:dFrom, oPeriod:dTo)
+        else
+            aAdd(aColumns, tdash.core.u_jsonColumn("document", "Nota fiscal", "text"))
+            aAdd(aColumns, tdash.core.u_jsonColumn("party", "Cliente ou fornecedor", "text"))
+            aAdd(aColumns, tdash.core.u_jsonColumn("cancelDate", "Cancelamento", "date"))
+            aAdd(aColumns, tdash.core.u_jsonColumn("balance", "Valor contábil", "BRL"))
+            jBody := oRepo:cancelledItems(oPeriod:dFrom, oPeriod:dTo, nPage, nPageSize)
+            jBody["columns"] := aColumns
+        endIf
+
+        oHelper:setCacheHeaders(aDef[6])
+        oRest:setResponse(oHelper:getResponse(jBody))
+    CATCH oError
+        oHelper:serverError("TDashFisApi:list", oError:description)
+    ENDTRY
+return .T.
+
+/*/{Protheus.doc} kpiValue
+Calcula o valor de um cartão.
+@type method
+@author TDash
+@since 21/10/2026
+@param cId, character, id do indicador
+@param dFrom, date, início do período
+@param dTo, date, fim do período
+@return numeric, valor
+/*/
+method kpiValue(cId as character, dFrom as date, dTo as date) as numeric class TDashFisApi
+    local oRepo   := TDashFisRepository():new() as object
+    local aTotals := {} as array
+    local nValue  := 0 as numeric
+
+    do case
+        case cId == "fis.icms_balance"
+            aTotals := oRepo:taxTotals("icms", dFrom, dTo)
+            nValue  := aTotals[1] - aTotals[2]
+        case cId == "fis.ipi_balance"
+            aTotals := oRepo:taxTotals("ipi", dFrom, dTo)
+            nValue  := aTotals[1] - aTotals[2]
+        case cId == "fis.pis_cofins"
+            aTotals := oRepo:taxTotals("pis_cofins", dFrom, dTo)
+            nValue  := aTotals[1] - aTotals[2]
+        case cId == "fis.iss"
+            nValue := oRepo:iss(dFrom, dTo)
+        case cId == "fis.icms_st"
+            nValue := oRepo:sumField("F3_ICMSRET", dFrom, dTo)
+        case cId == "fis.difal"
+            nValue := oRepo:sumField("F3_DIFAL", dFrom, dTo)
+        case cId == "fis.cancelled"
+            nValue := oRepo:cancelled(dFrom, dTo)
+        case cId == "fis.tax_burden"
+            nValue := tdash.fis.u_taxBurden(tdash.fis.u_ledgerSum(::ledger(dFrom, dTo)))
+        case cId == "fis.ledger_debit"
+            nValue := tdash.fis.u_ledgerTotals(tdash.fis.u_ledgerSum(::ledger(dFrom, dTo)))["debit"]
+        case cId == "fis.ledger_credit"
+            nValue := tdash.fis.u_ledgerTotals(tdash.fis.u_ledgerSum(::ledger(dFrom, dTo)))["credit"]
+        case cId == "fis.ledger_balance"
+            nValue := tdash.fis.u_ledgerTotals(tdash.fis.u_ledgerSum(::ledger(dFrom, dTo)))["balance"]
+    endCase
+return nValue
+
+/*/{Protheus.doc} ledgerList
+Tabela da centralização de débitos e créditos.
+branch: filial do app, um tributo por linha com débito, crédito, saldo e situação.
+all: saldo de cada tributo por filial liberada ao usuário (mesma empresa do app) e a soma das filiais.
+@type method
+@author TDash
+@since 27/10/2026
+@param cScope, character, branch | all
+@param dFrom, date, início
+@param dTo, date, fim
+@return json, { columns, items, total, hasNext }
+/*/
+method ledgerList(cScope as character, dFrom as date, dTo as date) as json class TDashFisApi
+    local oRepo     := TDashFisRepository():new() as object
+    local jBody     := jsonObject():new() as json
+    local aColumns  := {} as array
+    local aItems    := {} as array
+    local aBranches := {} as array
+    local aSums     := {} as array
+    local nX        := 0 as numeric
+
+    aAdd(aColumns, tdash.core.u_jsonColumn("tax", "Tributo", "text"))
+    if cScope == "all"
+        aBranches := userBranches()
+        for nX := 1 to Len(aBranches)
+            aAdd(aSums, { aBranches[nX][1], tdash.fis.u_ledgerSum(oRepo:ledgerMonths(aBranches[nX][1], dFrom, dTo)) })
+            aAdd(aColumns, tdash.core.u_jsonColumn("b_" + AllTrim(aBranches[nX][1]), AllTrim(aBranches[nX][1]) + " " + aBranches[nX][2], "BRL"))
+        next nX
+        aAdd(aColumns, tdash.core.u_jsonColumn("total", "Todas as filiais", "BRL"))
+        aItems := tdash.fis.u_branchLines(aSums)
+    else
+        aAdd(aColumns, tdash.core.u_jsonColumn("debit", "Débito", "BRL"))
+        aAdd(aColumns, tdash.core.u_jsonColumn("credit", "Crédito", "BRL"))
+        aAdd(aColumns, tdash.core.u_jsonColumn("balance", "Saldo", "BRL"))
+        aAdd(aColumns, tdash.core.u_jsonColumn("status", "Situação", "text"))
+        aItems := tdash.fis.u_ledgerLines(tdash.fis.u_ledgerSum(::ledger(dFrom, dTo)))
+    endIf
+
+    jBody["columns"] := aColumns
+    jBody["items"]   := aItems
+    jBody["total"]   := Len(aItems)
+    jBody["hasNext"] := .F.
+return jBody
+
+/*/{Protheus.doc} userBranches
+Filiais da empresa do app liberadas ao usuário da requisição (FWLoadSM0 com SM0_USEROK), como em /core/branches.
+@type static function
+@author TDash
+@since 27/10/2026
+@return array, { { filial, nome reduzido }, ... }
+/*/
+static function userBranches() as array
+    local aBranches := {} as array
+    local aSM0      := FWLoadSM0(.T., .T.) as array
+    local nX        := 0 as numeric
+
+    for nX := 1 to Len(aSM0)
+        if valType(aSM0[nX][SM0_USEROK]) == "L" .and. aSM0[nX][SM0_USEROK] .and. AllTrim(aSM0[nX][SM0_GRPEMP]) == AllTrim(cEmpAnt)
+            aAdd(aBranches, { aSM0[nX][SM0_CODFIL], AllTrim(aSM0[nX][SM0_NOMRED]) })
+        endIf
+    next nX
+return aBranches
+
+/*/{Protheus.doc} fisCatalog
+Catálogo de Livros Fiscais: { id, tipos, título, unidade, sentido, ttl }.
+@type static function
+@author TDash
+@since 21/10/2026
+@return array, indicadores
+/*/
+static function fisCatalog() as array
+return {;
+    { "fis.icms_balance", { "kpi", "series" }, "Saldo de ICMS (débito - crédito)",      "BRL",   "neutral",      TTL_EST },;
+    { "fis.ipi_balance",  { "kpi", "series" }, "Saldo de IPI (débito - crédito)",       "BRL",   "neutral",      TTL_EST },;
+    { "fis.pis_cofins",   { "kpi", "series" }, "Saldo de PIS e COFINS (débito - crédito)", "BRL", "neutral",     TTL_EST },;
+    { "fis.iss",          { "kpi" },           "ISS das notas de serviço",              "BRL",   "neutral",      TTL_EST },;
+    { "fis.icms_st",      { "kpi" },           "ICMS ST retido",                        "BRL",   "neutral",      TTL_EST },;
+    { "fis.difal",        { "kpi" },           "DIFAL",                                 "BRL",   "neutral",      TTL_EST },;
+    { "fis.by_cfop",      { "breakdown" },     "Valor contábil por CFOP",               "BRL",   "neutral",      TTL_EST },;
+    { "fis.by_state",     { "breakdown" },     "Saídas por UF",                         "BRL",   "neutral",      TTL_EST },;
+    { "fis.cancelled",    { "kpi", "list" },   "Notas canceladas",                      "COUNT", "down_is_good", TTL_EST },;
+    { "fis.tax_burden",     { "kpi" },       "Carga tributária das saídas",             "PCT", "down_is_good", TTL_TAT },;
+    { "fis.ledger_debit",   { "kpi" },       "Débitos de tributos (sem CBS e IBS)",     "BRL", "neutral",      TTL_TAT },;
+    { "fis.ledger_credit",  { "kpi" },       "Créditos de tributos (sem CBS e IBS)",    "BRL", "neutral",      TTL_TAT },;
+    { "fis.ledger_balance", { "kpi" },       "Saldo dos tributos (débito - crédito)",   "BRL", "neutral",      TTL_TAT },;
+    { "fis.ledger_trend",   { "series" },    "Débitos x créditos de tributos",          "BRL", "neutral",      TTL_TAT },;
+    { "fis.ledger",         { "list" },      "Centralização de débitos e créditos",     "BRL", "neutral",      TTL_TAT },;
+    { "fis.top_parties",    { "breakdown" }, "Clientes e fornecedores por tributos",    "BRL", "neutral",      TTL_TAT },;
+    { "fis.top_ncm",        { "breakdown" }, "NCM das saídas por tributos",             "BRL", "neutral",      TTL_TAT },;
+    { "fis.by_state_in",    { "breakdown" }, "Entradas por UF",                         "BRL", "neutral",      TTL_EST } }

@@ -1,0 +1,455 @@
+#include 'tlpp-core.th'
+#include 'totvs.ch'
+
+namespace tdash.fin
+
+/*/{Protheus.doc} TDashFinPartyRepository
+Consultas da posição financeira de um cliente (SA1, SE1) ou fornecedor (SA2, SE2), como as consultas padrão
+FINC010 e FINC030. Sem loja informada, junta todas as lojas do código.
+Os títulos usam as mesmas exclusões de tipo dos indicadores do Financeiro (abatimentos, provisórios,
+adiantamentos e créditos) e o recebido/pago usa os filtros de movimento bancário do FINR620.
+Regras: docs/10-catalogo-de-indicadores.md (Financeiro, posição do cliente e do fornecedor).
+@type class
+@author TDash
+@since 22/10/2026
+@version 1.0
+/*/
+class TDashFinPartyRepository
+    public method new()
+
+    public method search(cType as character, cTerm as character, nMax as numeric) as array
+    public method stores(cType as character, cCode as character) as array
+    public method balance(cType as character, cScope as character, dToday as date, cCode as character, cStore as character) as numeric
+    public method aging(cType as character, dToday as date, cCode as character, cStore as character) as array
+    public method titles(cType as character, dToday as date, cCode as character, cStore as character, nPage as numeric, nPageSize as numeric) as json
+    public method settled(cType as character, dFrom as date, dTo as date, cCode as character, cStore as character) as array
+
+    private method titleFrom(cType as character, cStore as character) as character
+    private method bindTitles(oQuery as object, cType as character, cCode as character, cStore as character) as numeric
+    private method info(cType as character) as json
+endclass
+
+method new() class TDashFinPartyRepository
+return self
+
+/*/{Protheus.doc} search
+Clientes ou fornecedores cujo nome, nome fantasia, código ou CNPJ/CPF contenham o texto. Um item por código
+(todas as lojas juntas), em ordem de nome.
+@type method
+@author TDash
+@since 22/10/2026
+@param cType, character, "customer" ou "supplier"
+@param cTerm, character, texto procurado (já validado: 3 a 40 caracteres)
+@param nMax, numeric, quantidade máxima
+@return array, { { código, nome, CNPJ/CPF, município, UF, quantidade de lojas }, ... } (até nMax + 1, para saber se há mais)
+/*/
+method search(cType as character, cTerm as character, nMax as numeric) as array class TDashFinPartyRepository
+    local jInfo  := ::info(cType) as json
+    local cP     := jInfo["prefix"] as character
+    local aRows  := {} as array
+    local cQry   := "" as character
+    local cAlias := "" as character
+    local cLike  := "%" + Upper(AllTrim(cTerm)) + "%" as character
+    local oQuery as object
+
+    cQry := " SELECT C." + cP + "COD CODIGO, MIN(C." + cP + "NOME) NOME, MIN(C." + cP + "CGC) CGC, "
+    cQry += " MIN(C." + cP + "MUN) MUN, MIN(C." + cP + "EST) UF, COUNT(*) LOJAS "
+    cQry += " FROM " + RetSqlName(jInfo["table"]) + " C "
+    cQry += " WHERE C." + cP + "FILIAL = ? "
+    cQry += " AND ( UPPER(C." + cP + "NOME) LIKE ? OR UPPER(C." + cP + "NREDUZ) LIKE ? "
+    cQry += "       OR C." + cP + "COD LIKE ? OR C." + cP + "CGC LIKE ? ) "
+    cQry += " AND C.D_E_L_E_T_ = ' ' "
+    cQry += " GROUP BY C." + cP + "COD "
+    cQry += " ORDER BY MIN(C." + cP + "NOME) "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    oQuery:setString(1, FWxFilial(jInfo["table"]))
+    oQuery:setString(2, cLike)
+    oQuery:setString(3, cLike)
+    oQuery:setString(4, Upper(AllTrim(cTerm)) + "%")
+    oQuery:setString(5, cLike)
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof()) .and. Len(aRows) <= nMax
+            aAdd(aRows, { AllTrim((cAlias)->CODIGO), AllTrim((cAlias)->NOME), AllTrim((cAlias)->CGC), ;
+                AllTrim((cAlias)->MUN), AllTrim((cAlias)->UF), (cAlias)->LOJAS })
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+return aRows
+
+/*/{Protheus.doc} stores
+Cadastro de cada loja do código, com os campos de histórico que o Protheus mantém (maior compra, maior saldo,
+primeira e última compra, número de compras e atrasos) e, para clientes, o limite de crédito.
+@type method
+@author TDash
+@since 22/10/2026
+@param cType, character, "customer" ou "supplier"
+@param cCode, character, código
+@return array, lojas (json) { store, name, fantasy, document, city, state, blocked, creditLimit, creditDue,
+        largestPurchase, largestBalance, firstPurchase, lastPurchase, purchases, maxDelay, avgDelay, payments }
+/*/
+method stores(cType as character, cCode as character) as array class TDashFinPartyRepository
+    local jInfo   := ::info(cType) as json
+    local cP      := jInfo["prefix"] as character
+    local lClient := cType == "customer" as logical
+    local aStores := {} as array
+    local jStore  as json
+    local cQry    := "" as character
+    local cAlias  := "" as character
+    local oQuery  as object
+
+    cQry := " SELECT C." + cP + "LOJA LOJA, C." + cP + "NOME NOME, C." + cP + "NREDUZ FANTASIA, C." + cP + "CGC CGC, "
+    cQry += " C." + cP + "MUN MUN, C." + cP + "EST UF, C." + cP + "MSBLQL BLOQUEADO, "
+    cQry += " C." + cP + "MCOMPRA MCOMPRA, C." + cP + "MSALDO MSALDO, C." + cP + "PRICOM PRICOM, C." + cP + "ULTCOM ULTCOM, "
+    cQry += " C." + cP + "NROCOM NROCOM, C." + cP + "MATR MATR "
+    if lClient
+        cQry += " , C.A1_LC LC, C.A1_VENCLC VENCLC, C.A1_METR METR, C.A1_NROPAG NROPAG "
+    endIf
+    cQry += " FROM " + RetSqlName(jInfo["table"]) + " C "
+    cQry += " WHERE C." + cP + "FILIAL = ? "
+    cQry += " AND C." + cP + "COD = ? "
+    cQry += " AND C.D_E_L_E_T_ = ' ' "
+    cQry += " ORDER BY C." + cP + "LOJA "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    oQuery:setString(1, FWxFilial(jInfo["table"]))
+    oQuery:setString(2, cCode)
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof())
+            jStore := jsonObject():new()
+            jStore["store"]           := AllTrim((cAlias)->LOJA)
+            jStore["name"]            := AllTrim((cAlias)->NOME)
+            jStore["fantasy"]         := AllTrim((cAlias)->FANTASIA)
+            jStore["document"]        := AllTrim((cAlias)->CGC)
+            jStore["city"]            := AllTrim((cAlias)->MUN)
+            jStore["state"]           := AllTrim((cAlias)->UF)
+            jStore["blocked"]         := (cAlias)->BLOQUEADO == "1"
+            jStore["largestPurchase"] := (cAlias)->MCOMPRA
+            jStore["largestBalance"]  := (cAlias)->MSALDO
+            jStore["firstPurchase"]   := AllTrim((cAlias)->PRICOM)
+            jStore["lastPurchase"]    := AllTrim((cAlias)->ULTCOM)
+            jStore["purchases"]       := (cAlias)->NROCOM
+            jStore["maxDelay"]        := (cAlias)->MATR
+            jStore["creditLimit"]     := 0
+            jStore["creditDue"]       := ""
+            jStore["avgDelay"]        := 0
+            jStore["payments"]        := 0
+            if lClient
+                jStore["creditLimit"] := (cAlias)->LC
+                jStore["creditDue"]   := AllTrim((cAlias)->VENCLC)
+                jStore["avgDelay"]    := (cAlias)->METR
+                jStore["payments"]    := (cAlias)->NROPAG
+            endIf
+            aAdd(aStores, jStore)
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+return aStores
+
+/*/{Protheus.doc} balance
+Saldo dos títulos em aberto do cliente ou fornecedor. cScope: "open" (todo o saldo) ou "overdue" (vencimento real
+antes de hoje).
+@type method
+@author TDash
+@since 22/10/2026
+@param cType, character, "customer" ou "supplier"
+@param cScope, character, open | overdue
+@param dToday, date, data de referência
+@param cCode, character, código
+@param cStore, character, loja (vazio = todas)
+@return numeric, saldo
+/*/
+method balance(cType as character, cScope as character, dToday as date, cCode as character, cStore as character) as numeric class TDashFinPartyRepository
+    local jInfo  := ::info(cType) as json
+    local cP     := jInfo["titlePrefix"] as character
+    local cQry   := "" as character
+    local nNext  := 0 as numeric
+    local nTotal := 0 as numeric
+    local xTotal
+    local oQuery as object
+
+    cQry := " SELECT SUM(T." + cP + "SALDO) TOTAL " + ::titleFrom(cType, cStore)
+    if cScope == "overdue"
+        cQry += " AND T." + cP + "VENCREA < ? AND T." + cP + "VENCREA <> ' ' "
+    endIf
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    nNext  := ::bindTitles(oQuery, cType, cCode, cStore)
+    if cScope == "overdue"
+        oQuery:setString(nNext, DToS(dToday))
+    endIf
+    if oQuery:open()
+        xTotal := (oQuery:getAlias())->TOTAL
+        if valType(xTotal) == "N"
+            nTotal := xTotal
+        endIf
+        oQuery:close()
+    endIf
+return Round(nTotal, 2)
+
+/*/{Protheus.doc} aging
+Saldo vencido do cliente ou fornecedor por faixa de atraso (as mesmas faixas do aging do Financeiro).
+@type method
+@author TDash
+@since 22/10/2026
+@param cType, character, "customer" ou "supplier"
+@param dToday, date, data de referência
+@param cCode, character, código
+@param cStore, character, loja (vazio = todas)
+@return array, { { chave, rótulo, valor }, ... }
+/*/
+method aging(cType as character, dToday as date, cCode as character, cStore as character) as array class TDashFinPartyRepository
+    local jInfo    := ::info(cType) as json
+    local cP       := jInfo["titlePrefix"] as character
+    local aBuckets := tdash.fin.u_agingBuckets() as array
+    local cQry     := "" as character
+    local cAlias   := "" as character
+    local nNext    := 0 as numeric
+    local nPos     := 0 as numeric
+    local oQuery   as object
+
+    cQry := " SELECT T." + cP + "VENCREA VENC, SUM(T." + cP + "SALDO) SALDO " + ::titleFrom(cType, cStore)
+    cQry += " AND T." + cP + "VENCREA < ? AND T." + cP + "VENCREA <> ' ' "
+    cQry += " GROUP BY T." + cP + "VENCREA "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    nNext  := ::bindTitles(oQuery, cType, cCode, cStore)
+    oQuery:setString(nNext, DToS(dToday))
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof())
+            nPos := tdash.fin.u_agingBucket(DateDiffDay(SToD((cAlias)->VENC), dToday))
+            aBuckets[nPos][3] += (cAlias)->SALDO
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+return aBuckets
+
+/*/{Protheus.doc} titles
+Títulos em aberto do cliente ou fornecedor, do vencimento mais antigo para o mais novo, paginados.
+@type method
+@author TDash
+@since 22/10/2026
+@param cType, character, "customer" ou "supplier"
+@param dToday, date, data de referência (dias de atraso)
+@param cCode, character, código
+@param cStore, character, loja (vazio = todas)
+@param nPage, numeric, página (a partir de 1)
+@param nPageSize, numeric, itens por página
+@return json, { items, hasNext, total }
+/*/
+method titles(cType as character, dToday as date, cCode as character, cStore as character, nPage as numeric, nPageSize as numeric) as json class TDashFinPartyRepository
+    local jInfo   := ::info(cType) as json
+    local cP      := jInfo["titlePrefix"] as character
+    local jResult := jsonObject():new() as json
+    local jItem   as json
+    local aItems  := {} as array
+    local cQry    := "" as character
+    local cAlias  := "" as character
+    local dDue    as date
+    local nTotal  := 0 as numeric
+    local xTotal
+    local oQuery  as object
+
+    oQuery := tdash.core.TDashQuery():new(" SELECT COUNT(*) TOTAL " + ::titleFrom(cType, cStore))
+    ::bindTitles(oQuery, cType, cCode, cStore)
+    if oQuery:open()
+        xTotal := (oQuery:getAlias())->TOTAL
+        if valType(xTotal) == "N"
+            nTotal := xTotal
+        endIf
+        oQuery:close()
+    endIf
+
+    cQry := " SELECT T." + cP + "PREFIXO PREFIXO, T." + cP + "NUM NUM, T." + cP + "PARCELA PARCELA, T." + cP + "TIPO TIPO, "
+    cQry += " T." + cP + "LOJA LOJA, T." + cP + "EMISSAO EMISSAO, T." + cP + "VENCREA VENC, T." + cP + "VALOR VALOR, T." + cP + "SALDO SALDO "
+    cQry += ::titleFrom(cType, cStore)
+    cQry += " ORDER BY T." + cP + "VENCREA, T." + cP + "PREFIXO, T." + cP + "NUM, T." + cP + "PARCELA "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    ::bindTitles(oQuery, cType, cCode, cStore)
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        (cAlias)->(DbSkip((nPage - 1) * nPageSize))
+        while !(cAlias)->(Eof()) .and. Len(aItems) < nPageSize
+            dDue  := SToD((cAlias)->VENC)
+            jItem := jsonObject():new()
+            jItem["document"] := AllTrim((cAlias)->PREFIXO) + " " + AllTrim((cAlias)->NUM) + " " + AllTrim((cAlias)->PARCELA) + " " + AllTrim((cAlias)->TIPO)
+            jItem["party"]    := "Loja " + AllTrim((cAlias)->LOJA)
+            jItem["issueDate"] := Transform((cAlias)->EMISSAO, "@R 9999-99-99")
+            jItem["dueDate"]  := Transform((cAlias)->VENC, "@R 9999-99-99")
+            jItem["value"]    := Round((cAlias)->VALOR, 2)
+            jItem["balance"]  := Round((cAlias)->SALDO, 2)
+            // DateDiffDay devolve a diferença sem sinal: só conta atraso de título já vencido
+            jItem["daysLate"] := 0
+            if !Empty(dDue) .and. dDue < dToday
+                jItem["daysLate"] := DateDiffDay(dDue, dToday)
+            endIf
+            aAdd(aItems, jItem)
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+
+    jResult["items"]   := aItems
+    jResult["total"]   := nTotal
+    jResult["hasNext"] := (nPage * nPageSize) < nTotal
+return jResult
+
+/*/{Protheus.doc} settled
+Recebido do cliente (ou pago ao fornecedor) por dia de disponibilidade, no movimento bancário (SE5) com os filtros do
+FINR620. Estornos (E5_TIPODOC = "ES") abatem o valor. Do cliente entram os recebimentos (E5_RECPAG = "R") e os
+estornos deles; do fornecedor, os pagamentos (E5_RECPAG = "P") e os estornos deles.
+@type method
+@author TDash
+@since 22/10/2026
+@param cType, character, "customer" ou "supplier"
+@param dFrom, date, início (E5_DTDISPO)
+@param dTo, date, fim
+@param cCode, character, código
+@param cStore, character, loja (vazio = todas)
+@return array, { { data AAAAMMDD, valor }, ... } ordenado por data
+/*/
+method settled(cType as character, dFrom as date, dTo as date, cCode as character, cStore as character) as array class TDashFinPartyRepository
+    local oFin     := TDashFinRepository():new() as object
+    local aMotives := oFin:motivesWithoutBank() as array
+    local aRows    := {} as array
+    local cMain    := "R" as character
+    local cReverse := "P" as character
+    local cQry     := "" as character
+    local cAlias   := "" as character
+    local nNext    := 4 as numeric
+    local oQuery   as object
+
+    if cType == "supplier"
+        cMain    := "P"
+        cReverse := "R"
+    endIf
+
+    cQry := " SELECT E5.E5_DTDISPO DIA, SUM(CASE WHEN E5.E5_TIPODOC = 'ES' THEN 0 - E5.E5_VALOR ELSE E5.E5_VALOR END) VALOR "
+    cQry += " FROM " + RetSqlName("SE5") + " E5 "
+    cQry += oFin:cashWhere()
+    cQry += " AND ( ( E5.E5_RECPAG = '" + cMain + "' AND E5.E5_TIPODOC <> 'ES' ) "
+    cQry += "       OR ( E5.E5_RECPAG = '" + cReverse + "' AND E5.E5_TIPODOC = 'ES' ) ) "
+    cQry += " AND E5.E5_CLIFOR = ? "
+    if !Empty(cStore)
+        cQry += " AND E5.E5_LOJA = ? "
+    endIf
+    if Len(aMotives) > 0
+        cQry += " AND ( E5.E5_MOTBX = ' ' OR E5.E5_MOTBX NOT IN (?) ) "
+    endIf
+    cQry += " GROUP BY E5.E5_DTDISPO "
+    cQry += " ORDER BY E5.E5_DTDISPO "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    oQuery:setString(1, FWxFilial("SE5"))
+    oQuery:setString(2, DToS(dFrom))
+    oQuery:setString(3, DToS(dTo))
+    oQuery:setString(nNext, cCode)
+    if !Empty(cStore)
+        nNext++
+        oQuery:setString(nNext, cStore)
+    endIf
+    if Len(aMotives) > 0
+        nNext++
+        oQuery:setIn(nNext, aMotives)
+    endIf
+
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof())
+            aAdd(aRows, { (cAlias)->DIA, (cAlias)->VALOR })
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+return aRows
+
+/*/{Protheus.doc} titleFrom
+FROM e WHERE dos títulos em aberto do cliente ou fornecedor (alias T). Binds em bindTitles.
+@type method
+@author TDash
+@since 22/10/2026
+@param cType, character, "customer" ou "supplier"
+@param cStore, character, loja (vazio = todas)
+@return character, cláusulas
+/*/
+method titleFrom(cType as character, cStore as character) as character class TDashFinPartyRepository
+    local jInfo := ::info(cType) as json
+    local cP    := jInfo["titlePrefix"] as character
+    local cFrom := "" as character
+
+    cFrom := " FROM " + RetSqlName(jInfo["titleTable"]) + " T "
+    cFrom += " WHERE T." + cP + "FILIAL = ? "
+    cFrom += " AND T." + cP + jInfo["titleParty"] + " = ? "
+    if !Empty(cStore)
+        cFrom += " AND T." + cP + "LOJA = ? "
+    endIf
+    cFrom += " AND T." + cP + "SALDO >= 0.01 "
+    cFrom += " AND T." + cP + "TIPO NOT IN (?) "
+    cFrom += " AND T.D_E_L_E_T_ = ' ' "
+return cFrom
+
+/*/{Protheus.doc} bindTitles
+Binds de titleFrom: filial, código, loja (quando informada) e tipos excluídos.
+@type method
+@author TDash
+@since 22/10/2026
+@param oQuery, object, consulta
+@param cType, character, "customer" ou "supplier"
+@param cCode, character, código
+@param cStore, character, loja (vazio = todas)
+@return numeric, posição do próximo bind
+/*/
+method bindTitles(oQuery as object, cType as character, cCode as character, cStore as character) as numeric class TDashFinPartyRepository
+    local jInfo := ::info(cType) as json
+    local cSide := "R" as character
+    local nPos  := 1 as numeric
+    local oFin  := TDashFinRepository():new() as object
+
+    if cType == "supplier"
+        cSide := "P"
+    endIf
+
+    oQuery:setString(nPos, FWxFilial(jInfo["titleTable"]))
+    nPos++
+    oQuery:setString(nPos, cCode)
+    nPos++
+    if !Empty(cStore)
+        oQuery:setString(nPos, cStore)
+        nPos++
+    endIf
+    oQuery:setIn(nPos, oFin:excludedTypes(cSide))
+    nPos++
+return nPos
+
+/*/{Protheus.doc} info
+Tabelas e campos de cada tipo: cadastro (SA1/SA2) e títulos (SE1/SE2).
+@type method
+@author TDash
+@since 22/10/2026
+@param cType, character, "customer" ou "supplier"
+@return json, { table, prefix, titleTable, titlePrefix, titleParty }
+/*/
+method info(cType as character) as json class TDashFinPartyRepository
+    local jInfo := jsonObject():new() as json
+
+    if cType == "supplier"
+        jInfo["table"]       := "SA2"
+        jInfo["prefix"]      := "A2_"
+        jInfo["titleTable"]  := "SE2"
+        jInfo["titlePrefix"] := "E2_"
+        jInfo["titleParty"]  := "FORNECE"
+    else
+        jInfo["table"]       := "SA1"
+        jInfo["prefix"]      := "A1_"
+        jInfo["titleTable"]  := "SE1"
+        jInfo["titlePrefix"] := "E1_"
+        jInfo["titleParty"]  := "CLIENTE"
+    endIf
+return jInfo

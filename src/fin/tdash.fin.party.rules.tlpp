@@ -1,0 +1,147 @@
+#include 'tlpp-core.th'
+#include 'totvs.ch'
+
+namespace tdash.fin
+
+/*/{Protheus.doc} u_agingBuckets
+Faixas de atraso do aging, zeradas: 1-30, 31-60, 61-90, 91-180 e acima de 180 dias.
+@type user function
+@author TDash
+@since 22/10/2026
+@return array, { { chave, rótulo, valor }, ... }
+/*/
+User Function agingBuckets() as array
+return {;
+    { "1-30",   "Até 30 dias",       0 },;
+    { "31-60",  "31 a 60 dias",      0 },;
+    { "61-90",  "61 a 90 dias",      0 },;
+    { "91-180", "91 a 180 dias",     0 },;
+    { "180+",   "Acima de 180 dias", 0 } }
+
+/*/{Protheus.doc} u_agingBucket
+Posição da faixa de atraso (em u_agingBuckets) para uma quantidade de dias.
+@type user function
+@author TDash
+@since 22/10/2026
+@param nDays, numeric, dias de atraso
+@return numeric, posição de 1 a 5
+/*/
+User Function agingBucket(nDays as numeric) as numeric
+    local aLimits := { 30, 60, 90, 180 } as array
+    local nPos    := AScan(aLimits, {|n| nDays <= n}) as numeric
+
+    if nPos == 0
+        nPos := Len(aLimits) + 1
+    endIf
+return nPos
+
+/*/{Protheus.doc} u_validPartyKey
+Confere um código ou loja de cliente/fornecedor vindo da requisição: preenchido, até nSize caracteres, só letras
+e números.
+@type user function
+@author TDash
+@since 22/10/2026
+@param cValue, character, valor
+@param nSize, numeric, tamanho do campo (TamSX3)
+@return logical, .T. quando válido
+/*/
+User Function validPartyKey(cValue as character, nSize as numeric) as logical
+    local cText := AllTrim(cValue) as character
+    local lOk   := !Empty(cText) .and. Len(cText) <= nSize as logical
+    local nX    := 0 as numeric
+
+    for nX := 1 to Len(cText)
+        if !lOk
+            exit
+        endIf
+        lOk := IsAlpha(SubStr(cText, nX, 1)) .or. IsDigit(SubStr(cText, nX, 1))
+    next nX
+return lOk
+
+/*/{Protheus.doc} u_consolidateStores
+Junta o cadastro das lojas de um cliente ou fornecedor numa posição só ("Todas as lojas"):
+- limite de crédito: com MV_CREDCLI = "C" (crédito por cliente) vale o da primeira loja; senão, a soma das lojas.
+  A validade do limite segue a mesma regra (senão, a mais próxima entre as lojas com limite);
+- maior compra, maior saldo, última compra e maior atraso: o maior entre as lojas;
+- primeira compra: a mais antiga; número de compras e de pagamentos: a soma;
+- média de atraso: média das lojas ponderada pelo número de pagamentos (sem pagamentos, média simples).
+@type user function
+@author TDash
+@since 22/10/2026
+@param aStores, array, lojas (json) de TDashFinPartyRepository:stores, em ordem de loja
+@param cCreditMode, character, MV_CREDCLI ("L" loja ou "C" cliente)
+@return json, posição com as mesmas chaves das lojas, store vazio e stores = quantidade de lojas
+/*/
+User Function consolidateStores(aStores as array, cCreditMode as character) as json
+    local jTotal   := jsonObject():new() as json
+    local lPerClient := Upper(AllTrim(cCreditMode)) == "C" as logical
+    local nWeight  := 0 as numeric
+    local nSimple  := 0 as numeric
+    local nX       := 0 as numeric
+    local jStore   as json
+
+    jTotal["store"]           := ""
+    jTotal["stores"]          := Len(aStores)
+    jTotal["name"]            := ""
+    jTotal["fantasy"]         := ""
+    jTotal["document"]        := ""
+    jTotal["city"]            := ""
+    jTotal["state"]           := ""
+    jTotal["blocked"]         := Len(aStores) > 0
+    jTotal["creditLimit"]     := 0
+    jTotal["creditDue"]       := ""
+    jTotal["largestPurchase"] := 0
+    jTotal["largestBalance"]  := 0
+    jTotal["firstPurchase"]   := ""
+    jTotal["lastPurchase"]    := ""
+    jTotal["purchases"]       := 0
+    jTotal["maxDelay"]        := 0
+    jTotal["avgDelay"]        := 0
+    jTotal["payments"]        := 0
+
+    for nX := 1 to Len(aStores)
+        jStore := aStores[nX]
+        if nX == 1
+            jTotal["name"]     := jStore["name"]
+            jTotal["fantasy"]  := jStore["fantasy"]
+            jTotal["document"] := jStore["document"]
+            jTotal["city"]     := jStore["city"]
+            jTotal["state"]    := jStore["state"]
+        endIf
+        jTotal["blocked"] := jTotal["blocked"] .and. jStore["blocked"]
+
+        if lPerClient
+            if nX == 1
+                jTotal["creditLimit"] := jStore["creditLimit"]
+                jTotal["creditDue"]   := jStore["creditDue"]
+            endIf
+        else
+            jTotal["creditLimit"] += jStore["creditLimit"]
+            if jStore["creditLimit"] > 0 .and. !Empty(jStore["creditDue"]) .and. ;
+                    (Empty(jTotal["creditDue"]) .or. jStore["creditDue"] < jTotal["creditDue"])
+                jTotal["creditDue"] := jStore["creditDue"]
+            endIf
+        endIf
+
+        jTotal["largestPurchase"] := Max(jTotal["largestPurchase"], jStore["largestPurchase"])
+        jTotal["largestBalance"]  := Max(jTotal["largestBalance"], jStore["largestBalance"])
+        jTotal["maxDelay"]        := Max(jTotal["maxDelay"], jStore["maxDelay"])
+        jTotal["purchases"]       += jStore["purchases"]
+        jTotal["payments"]        += jStore["payments"]
+        if !Empty(jStore["firstPurchase"]) .and. (Empty(jTotal["firstPurchase"]) .or. jStore["firstPurchase"] < jTotal["firstPurchase"])
+            jTotal["firstPurchase"] := jStore["firstPurchase"]
+        endIf
+        if jStore["lastPurchase"] > jTotal["lastPurchase"]
+            jTotal["lastPurchase"] := jStore["lastPurchase"]
+        endIf
+
+        nWeight += jStore["avgDelay"] * jStore["payments"]
+        nSimple += jStore["avgDelay"]
+    next nX
+
+    if jTotal["payments"] > 0
+        jTotal["avgDelay"] := Round(nWeight / jTotal["payments"], 2)
+    elseIf Len(aStores) > 0
+        jTotal["avgDelay"] := Round(nSimple / Len(aStores), 2)
+    endIf
+return jTotal

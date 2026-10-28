@@ -1,0 +1,131 @@
+#include 'tlpp-core.th'
+#include 'totvs.ch'
+
+namespace tdash.tools
+
+/*/{Protheus.doc} u_tdAcessoDiag
+Diagnóstico (só leitura) dos módulos que o TDash libera para um usuário. Mostra o que vem do cadastro:
+menus do usuário (PswRet()[3]), grupos (PswRet()[1][10]), "Priorizar configuração do grupo" (PswRet()[2][11]),
+menus de cada grupo (FWGrpMenu) e o resultado de tdash.core.u_userModules.
+Uso, pelo Configurador > Fórmulas (ou qualquer tela que execute uma expressão):
+    tdash.tools.u_tdAcessoDiag("login.do.usuario")
+O resultado vai para o console do AppServer (ConOut) e, com interface, para uma janela.
+@type user function
+@author TDash
+@since 23/10/2026
+@param cLogin, character, login do usuário a conferir
+@return character, texto do diagnóstico
+/*/
+User Function tdAcessoDiag(cLogin as character) as character
+    local cText   := "" as character
+    local cUserId := "" as character
+    local aUser   := {} as array
+    local aGroups := {} as array
+    local aCodes  := {} as array
+    local nX      := 0 as numeric
+
+    PswOrder(2)
+    if PswSeek(AllTrim(cLogin), .T.)
+        cUserId := PswID()
+        aUser   := PswRet()
+        cText   += "Usuário: " + cUserId + " (" + AllTrim(cLogin) + ")" + CRLF
+        cText   += "Administrador: " + boolText(FWIsAdmin(cUserId)) + CRLF
+
+        if Len(aUser) >= 2 .and. Len(aUser[2]) >= 11 .and. ValType(aUser[2][11]) == "L"
+            cText += "Priorizar configuração do grupo: " + boolText(aUser[2][11]) + CRLF
+        endIf
+        cText += "Menus do usuário:" + CRLF
+        if Len(aUser) >= 3 .and. ValType(aUser[3]) == "A"
+            cText += listText(aUser[3])
+        endIf
+
+        if Len(aUser) >= 1 .and. Len(aUser[1]) >= 10 .and. ValType(aUser[1][10]) == "A"
+            aGroups := aUser[1][10]
+        endIf
+        for nX := 1 to Len(aGroups)
+            cText += "Menus do grupo " + aGroups[nX] + ":" + CRLF
+            cText += listText(FWGrpMenu(aGroups[nX]))
+        next nX
+
+        cText += "Módulos lidos (número): " + numbersText(tdash.core.u_menuModules(tdash.core.u_userMenus(cUserId))) + CRLF
+        aCodes := tdash.core.u_userModules(cUserId)
+        cText += "Módulos liberados no TDash: " + listLine(aCodes) + CRLF
+    else
+        cText := "Usuário não encontrado: " + AllTrim(cLogin) + CRLF
+    endIf
+
+    ConOut("[TDASH] Diagnóstico de acesso" + CRLF + cText)
+    if !IsBlind()
+        MsgInfo(cText, "TDash - diagnóstico de acesso")
+    endIf
+return cText
+
+/*/{Protheus.doc} boolText
+"Sim" ou "Não".
+@type static function
+@author TDash
+@since 23/10/2026
+@param lValue, logical, valor
+@return character, texto
+/*/
+Static Function boolText(lValue as logical) as character
+    local cText := "Não" as character
+
+    if lValue
+        cText := "Sim"
+    endIf
+return cText
+
+/*/{Protheus.doc} listText
+Uma linha por entrada, com recuo.
+@type static function
+@author TDash
+@since 23/10/2026
+@param aItems, array, entradas (texto)
+@return character, texto
+/*/
+Static Function listText(aItems as array) as character
+    local cText := "" as character
+    local nX    := 0 as numeric
+
+    for nX := 1 to Len(aItems)
+        cText += "    " + cValToChar(aItems[nX]) + CRLF
+    next nX
+return cText
+
+/*/{Protheus.doc} listLine
+Entradas separadas por vírgula.
+@type static function
+@author TDash
+@since 23/10/2026
+@param aItems, array, entradas (texto)
+@return character, texto
+/*/
+Static Function listLine(aItems as array) as character
+    local cText := "" as character
+    local nX    := 0 as numeric
+
+    for nX := 1 to Len(aItems)
+        if nX > 1
+            cText += ", "
+        endIf
+        cText += aItems[nX]
+    next nX
+return cText
+
+/*/{Protheus.doc} numbersText
+Números separados por vírgula.
+@type static function
+@author TDash
+@since 23/10/2026
+@param aItems, array, números
+@return character, texto
+/*/
+Static Function numbersText(aItems as array) as character
+    local aText := {} as array
+    local nX    := 0 as numeric
+
+    for nX := 1 to Len(aItems)
+        aAdd(aText, cValToChar(aItems[nX]))
+    next nX
+return listLine(aText)

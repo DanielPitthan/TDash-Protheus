@@ -1,0 +1,111 @@
+#include 'tlpp-core.th'
+#include 'tlpp-rest.th'
+#include 'totvs.ch'
+
+#define TTL_BRANCHES 3600
+#define TTL_MODULES  300
+
+/*/{Protheus.doc} TDashCoreApi
+API do núcleo do TDash: filiais do usuário para a tela de escolha de filial do app e módulos liberados
+ao usuário, para o app mostrar só os painéis desses módulos.
+Usuário, tenantid e x-erp-module são validados pelo próprio ERP.
+@type class
+@author TDash
+@since 20/10/2026
+@version 1.0
+/*/
+namespace tdash.core
+
+class TDashCoreApi
+    public method new()
+
+    @Get("/tdash/v1/core/branches")
+    public method getBranches()
+
+    @Get("/tdash/v1/core/modules")
+    public method getModules()
+endclass
+
+method new() class TDashCoreApi
+return self
+
+/*/{Protheus.doc} getBranches
+GET /tdash/v1/core/branches
+Empresas e filiais liberadas ao usuário (FWLoadSM0 com SM0_USEROK), para a tela de escolha
+de filial do app.
+@type method
+@author TDash
+@since 20/10/2026
+@return logical, sempre .T.
+/*/
+method getBranches() class TDashCoreApi
+    local lRet    := .T. as logical
+    local oHelper := TDashResponseHelper():new() as object
+    local jBody   := jsonObject():new() as json
+    local jItem   as json
+    local aItems  := {} as array
+    local aSM0    := {} as array
+    local nX      := 0 as numeric
+
+    TRY
+        // 2º parâmetro .T.: calcula SM0_USEROK para o usuário da thread
+        aSM0 := FWLoadSM0(.T., .T.)
+        for nX := 1 to len(aSM0)
+            if valType(aSM0[nX][SM0_USEROK]) == "L" .and. aSM0[nX][SM0_USEROK]
+                jItem := jsonObject():new()
+                jItem["company"]     := allTrim(aSM0[nX][SM0_GRPEMP])
+                jItem["branch"]      := aSM0[nX][SM0_CODFIL]
+                jItem["name"]        := allTrim(aSM0[nX][SM0_NOMRED])
+                jItem["companyName"] := allTrim(aSM0[nX][SM0_NOME])
+                jItem["cnpj"]        := allTrim(aSM0[nX][SM0_CGC])
+                aAdd(aItems, jItem)
+            endIf
+        next nX
+
+        jBody["items"] := aItems
+        oHelper:setCacheHeaders(TTL_BRANCHES)
+        oRest:setResponse(oHelper:getResponse(jBody))
+    CATCH oError
+        FWLogMsg("ERROR", , "TDASH", "TDashCoreApi:getBranches", , "01", oError:description, 0, 0, {})
+        oRest:setStatusCode(500)
+        oRest:setResponse(oHelper:getErrorResponse("TDASH-500", "Erro ao listar as filiais.", "Entre em contato com o administrador do sistema."))
+    ENDTRY
+return lRet
+
+/*/{Protheus.doc} getModules
+GET /tdash/v1/core/modules
+Módulos do TDash e se o usuário da requisição tem acesso a cada um (aba Menus do cadastro do usuário e
+dos grupos, u_userModules). Só define o que o app mostra: o REST continua validando cada chamada.
+@type method
+@author TDash
+@since 23/10/2026
+@return logical, sempre .T.
+/*/
+method getModules() class TDashCoreApi
+    local lRet     := .T. as logical
+    local oHelper  := TDashResponseHelper():new() as object
+    local jBody    := jsonObject():new() as json
+    local jItem    as json
+    local aItems   := {} as array
+    local aCodes   := {} as array
+    local aAllowed := {} as array
+    local nX       := 0 as numeric
+
+    TRY
+        aCodes   := tdash.core.u_moduleCodes()
+        aAllowed := tdash.core.u_userModules(RetCodUsr())
+        for nX := 1 to len(aCodes)
+            jItem := jsonObject():new()
+            jItem["code"]    := aCodes[nX][1]
+            jItem["allowed"] := aScan(aAllowed, aCodes[nX][1]) > 0
+            aAdd(aItems, jItem)
+        next nX
+
+        jBody["items"] := aItems
+        jBody["ttl"]   := TTL_MODULES
+        oHelper:setCacheHeaders(TTL_MODULES)
+        oRest:setResponse(oHelper:getResponse(jBody))
+    CATCH oError
+        oHelper:serverError("TDashCoreApi:getModules", oError:description)
+    ENDTRY
+return lRet

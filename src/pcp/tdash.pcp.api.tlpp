@@ -1,0 +1,649 @@
+#include 'tlpp-core.th'
+#include 'tlpp-rest.th'
+#include 'totvs.ch'
+
+// Validade das respostas (segundos): operacional, tático, estratégico
+#define TTL_OP  300
+#define TTL_TAT 1800
+#define TTL_EST 43200
+
+#define DEFAULT_TOP       10
+#define DEFAULT_PAGE_SIZE 20
+
+/*/{Protheus.doc} TDashPcpApi
+APIs de negócio da Produção para o TDash.
+Rotas: catalog, kpis, series/:id, breakdown/:id, list/:id (prefixo /tdash/v1/pcp).
+Indicadores e regras: docs/10-catalogo-de-indicadores.md (seção Produção).
+Formato das respostas (o que o app espera): docs/02-contrato-de-resposta.md.
+@type class
+@author TDash
+@since 21/10/2026
+@version 1.0
+/*/
+namespace tdash.pcp
+
+class TDashPcpApi
+    private data cMaterialKey as character
+    private data aMaterial    as array
+
+    public method new()
+
+    @Get("/tdash/v1/pcp/catalog")
+    public method getCatalog()
+
+    @Get("/tdash/v1/pcp/kpis")
+    public method getKpis()
+
+    @Get("/tdash/v1/pcp/series/:id")
+    public method getSeries()
+
+    @Get("/tdash/v1/pcp/breakdown/:id")
+    public method getBreakdown()
+
+    @Get("/tdash/v1/pcp/list/:id")
+    public method getList()
+
+    private method kpiValue(cId as character, dFrom as date, dTo as date) as numeric
+    private method materials(dFrom as date, dTo as date) as array
+endclass
+
+method new() class TDashPcpApi
+    ::cMaterialKey := ""
+    ::aMaterial    := {}
+return self
+
+/*/{Protheus.doc} getCatalog
+GET /tdash/v1/pcp/catalog
+@type method
+@author TDash
+@since 21/10/2026
+@return logical, sempre .T.
+/*/
+method getCatalog() class TDashPcpApi
+    local oHelper := tdash.core.TDashResponseHelper():new() as object
+    local jBody   := jsonObject():new() as json
+
+    jBody["items"] := tdash.core.u_catalogItems(pcpCatalog())
+    oHelper:setCacheHeaders(TTL_EST)
+    oRest:setResponse(oHelper:getResponse(jBody))
+return .T.
+
+/*/{Protheus.doc} getKpis
+GET /tdash/v1/pcp/kpis?ids=a,b&dateFrom=AAAAMMDD&dateTo=AAAAMMDD&compare=none|prev|yoy
+OPs encerradas, atingimento do plano, perdas, horas e matéria-prima aceitam comparação; OPs abertas e atrasadas são
+posição de hoje.
+@type method
+@author TDash
+@since 21/10/2026
+@return logical, sempre .T.
+/*/
+method getKpis() class TDashPcpApi
+    local oRequest := tdash.core.TDashRequest():new() as object
+    local oHelper  := tdash.core.TDashResponseHelper():new() as object
+    local oPeriod  := tdash.core.TDashPeriod():new() as object
+    local oRepo    := TDashPcpRepository():new() as object
+    local jBody    := jsonObject():new() as json
+    local jItem    as json
+    local aIds     := {} as array
+    local aItems   := {} as array
+    local aDef     := {} as array
+    local aTotals  := {} as array
+    local lCompare := .F. as logical
+    local nTtl     := TTL_EST as numeric
+    local nValue   := 0 as numeric
+    local nPrev    := 0 as numeric
+    local nX       := 0 as numeric
+
+    aIds := StrTokArr2(oRequest:query("ids"), ",", .F.)
+    if Len(aIds) == 0 .or. Len(aIds) > 20
+        oHelper:badRequest("Informe de 1 a 20 indicadores em ids.")
+        return .T.
+    endIf
+
+    if !oPeriod:fromQuery(oRequest:query("dateFrom"), oRequest:query("dateTo"), oRequest:query("compare"), Date())
+        oHelper:badRequest(oPeriod:cError)
+        return .T.
+    endIf
+
+    for nX := 1 to Len(aIds)
+        if Len(tdash.core.u_findIndicator(pcpCatalog(), aIds[nX], "kpi")) == 0
+            oHelper:notFound(AllTrim(aIds[nX]), "pcp")
+            return .T.
+        endIf
+    next nX
+
+    TRY
+        for nX := 1 to Len(aIds)
+            aDef     := tdash.core.u_findIndicator(pcpCatalog(), aIds[nX], "kpi")
+            nValue   := ::kpiValue(aDef[1], oPeriod:dFrom, oPeriod:dTo)
+            lCompare := oPeriod:hasCompare() .and. aDef[1] <> "pcp.po_open" .and. aDef[1] <> "pcp.po_late"
+            nPrev    := 0
+            if lCompare
+                nPrev := ::kpiValue(aDef[1], oPeriod:compareFrom(), oPeriod:compareTo())
+            endIf
+
+            jItem := tdash.core.u_kpiItem(aDef, nValue, lCompare, oPeriod:cCompare, nPrev, oHelper:timestamp())
+            // Sem OPs com entrega no período o percentual não tem significado
+            if aDef[1] == "pcp.plan_attainment" .and. nValue == 0
+                aTotals := oRepo:planTotals(oPeriod:dFrom, oPeriod:dTo)
+                if aTotals[1] == 0
+                    jItem["title"]   := "Atingimento do plano (sem OPs no período)"
+                    jItem["compare"] := Nil
+                endIf
+            endIf
+
+            aAdd(aItems, jItem)
+            nTtl := Min(nTtl, aDef[6])
+        next nX
+
+        jBody["items"] := aItems
+        oHelper:setCacheHeaders(nTtl)
+        oRest:setResponse(oHelper:getResponse(jBody))
+    CATCH oError
+        oHelper:serverError("TDashPcpApi:kpis", oError:description)
+    ENDTRY
+return .T.
+
+/*/{Protheus.doc} getSeries
+GET /tdash/v1/pcp/series/:id?dateFrom&dateTo&grain=day|week|month
+pcp.production_daily: série "production" (quantidade produzida). pcp.losses: série "losses" (% de perda).
+pcp.hours: séries "productive" e "unproductive" (horas apontadas na SH6).
+@type method
+@author TDash
+@since 21/10/2026
+@return logical, sempre .T.
+/*/
+method getSeries() class TDashPcpApi
+    local oRequest  := tdash.core.TDashRequest():new() as object
+    local oHelper   := tdash.core.TDashResponseHelper():new() as object
+    local oPeriod   := tdash.core.TDashPeriod():new() as object
+    local oRepo     := TDashPcpRepository():new() as object
+    local jBody     := jsonObject():new() as json
+    local aDef      := {} as array
+    local aRows     := {} as array
+    local aFirst    := {} as array
+    local aSecond   := {} as array
+    local aKeys     := {} as array
+    local aPoints   := {} as array
+    local aSeries   := {} as array
+    local cId       := oRequest:path("id") as character
+    local cGrain    := Lower(oRequest:query("grain")) as character
+    local nProduced := 0 as numeric
+    local nLost     := 0 as numeric
+    local nX        := 0 as numeric
+
+    aDef := tdash.core.u_findIndicator(pcpCatalog(), cId, "series")
+    if Len(aDef) == 0
+        oHelper:notFound(cId, "pcp")
+        return .T.
+    endIf
+
+    if Empty(cGrain)
+        cGrain := "day"
+    endIf
+    if AScan({ "day", "week", "month" }, {|x| x == cGrain}) == 0
+        oHelper:badRequest("grain inválido. Use day, week ou month.")
+        return .T.
+    endIf
+
+    if !oPeriod:fromQuery(oRequest:query("dateFrom"), oRequest:query("dateTo"), "none", Date())
+        oHelper:badRequest(oPeriod:cError)
+        return .T.
+    endIf
+
+    TRY
+        if cId == "pcp.hours"
+            // Horas produtivas e improdutivas, pela data do apontamento
+            aRows := oRepo:timeEntries(oPeriod:dFrom, oPeriod:dTo)
+            for nX := 1 to Len(aRows)
+                if aRows[nX][4]
+                    aAdd(aFirst, { aRows[nX][1], aRows[nX][5] })
+                else
+                    aAdd(aSecond, { aRows[nX][1], aRows[nX][5] })
+                endIf
+            next nX
+            aSeries := { "productive", "unproductive" }
+        else
+            aRows := oRepo:productionByDay(oPeriod:dFrom, oPeriod:dTo)
+            for nX := 1 to Len(aRows)
+                aAdd(aFirst,  { aRows[nX][1], aRows[nX][2] })
+                aAdd(aSecond, { aRows[nX][1], aRows[nX][3] })
+            next nX
+        endIf
+        aFirst  := tdash.core.u_groupRows(aFirst, cGrain)
+        aSecond := tdash.core.u_groupRows(aSecond, cGrain)
+        aKeys   := tdash.core.u_mergeKeys(aFirst, aSecond)
+
+        do case
+            case cId == "pcp.hours"
+                for nX := 1 to Len(aKeys)
+                    aAdd(aPoints, tdash.core.u_jsonPoint(aKeys[nX], Round(tdash.core.u_valueOf(aFirst, aKeys[nX]), 2), "productive"))
+                    aAdd(aPoints, tdash.core.u_jsonPoint(aKeys[nX], Round(tdash.core.u_valueOf(aSecond, aKeys[nX]), 2), "unproductive"))
+                next nX
+            case cId == "pcp.production_daily"
+                aSeries := { "production" }
+                for nX := 1 to Len(aKeys)
+                    aAdd(aPoints, tdash.core.u_jsonPoint(aKeys[nX], tdash.core.u_valueOf(aFirst, aKeys[nX]), "production"))
+                next nX
+            otherwise
+                // Perda = perdida / (produzida + perdida), no ponto de cada dia, semana ou mês
+                aSeries := { "losses" }
+                for nX := 1 to Len(aKeys)
+                    nProduced := tdash.core.u_valueOf(aFirst, aKeys[nX])
+                    nLost     := tdash.core.u_valueOf(aSecond, aKeys[nX])
+                    if nProduced + nLost > 0
+                        aAdd(aPoints, tdash.core.u_jsonPoint(aKeys[nX], (nLost / (nProduced + nLost)) * 100, "losses"))
+                    endIf
+                next nX
+        endCase
+
+        jBody["id"]          := aDef[1]
+        jBody["unit"]        := aDef[4]
+        jBody["grain"]       := cGrain
+        jBody["series"]      := aSeries
+        jBody["points"]      := aPoints
+        jBody["generatedAt"] := oHelper:timestamp()
+        jBody["ttl"]         := aDef[6]
+
+        oHelper:setCacheHeaders(aDef[6])
+        oRest:setResponse(oHelper:getResponse(jBody))
+    CATCH oError
+        oHelper:serverError("TDashPcpApi:series", oError:description)
+    ENDTRY
+return .T.
+
+/*/{Protheus.doc} getBreakdown
+GET /tdash/v1/pcp/breakdown/:id?top=10&dateFrom&dateTo
+pcp.top_products: produtos mais produzidos. pcp.hours_by_resource: horas por recurso (SH6, opcional).
+pcp.productivity: quantidade produzida por hora produtiva de cada recurso (sem "Outros": taxa não se soma).
+pcp.material_loss_by_product: perda de material (consumido - produzido) por produto das OPs encerradas, com avisos
+sobre o que ficou fora da conta.
+@type method
+@author TDash
+@since 21/10/2026
+@return logical, sempre .T.
+/*/
+method getBreakdown() class TDashPcpApi
+    local oRequest := tdash.core.TDashRequest():new() as object
+    local oHelper  := tdash.core.TDashResponseHelper():new() as object
+    local oPeriod  := tdash.core.TDashPeriod():new() as object
+    local oRepo    := TDashPcpRepository():new() as object
+    local jBody    := jsonObject():new() as json
+    local aDef     := {} as array
+    local aItems   := {} as array
+    local aOrders  := {} as array
+    local aWarning := {} as array
+    local cId      := oRequest:path("id") as character
+    local nTop     := 0 as numeric
+
+    aDef := tdash.core.u_findIndicator(pcpCatalog(), cId, "breakdown")
+    if Len(aDef) == 0
+        oHelper:notFound(cId, "pcp")
+        return .T.
+    endIf
+
+    nTop := tdash.core.u_parseInt(oRequest:query("top"), DEFAULT_TOP, 1, 50)
+    if nTop < 0
+        oHelper:badRequest("top deve estar entre 1 e 50.")
+        return .T.
+    endIf
+
+    if !oPeriod:fromQuery(oRequest:query("dateFrom"), oRequest:query("dateTo"), "none", Date())
+        oHelper:badRequest(oPeriod:cError)
+        return .T.
+    endIf
+
+    TRY
+        // Busca todas as linhas para somar o restante em "Outros"
+        do case
+            case cId == "pcp.hours_by_resource"
+                aItems := tdash.core.u_rowsToItems(oRepo:hoursByResource(oPeriod:dFrom, oPeriod:dTo))
+                aItems := tdash.core.u_topWithOthers(aItems, nTop, "Outros")
+            case cId == "pcp.productivity"
+                aItems := tdash.core.u_rowsToItems(productivityRows(oRepo:timeEntries(oPeriod:dFrom, oPeriod:dTo)))
+                if Len(aItems) > nTop
+                    aSize(aItems, nTop)
+                endIf
+            case cId == "pcp.material_loss_by_product"
+                aOrders  := ::materials(oPeriod:dFrom, oPeriod:dTo)
+                aItems   := tdash.core.u_rowsToItems(lossByProduct(aOrders))
+                aItems   := tdash.core.u_topWithOthers(aItems, nTop, "Outros")
+                aWarning := materialWarnings(tdash.pcp.u_materialTotals(aOrders))
+            otherwise
+                aItems := tdash.core.u_rowsToItems(oRepo:topProducts(oPeriod:dFrom, oPeriod:dTo))
+                aItems := tdash.core.u_topWithOthers(aItems, nTop, "Outros")
+        endCase
+
+        jBody["id"]          := aDef[1]
+        jBody["unit"]        := aDef[4]
+        jBody["items"]       := tdash.core.u_applyShares(aItems)
+        jBody["warnings"]    := aWarning
+        jBody["generatedAt"] := oHelper:timestamp()
+        jBody["ttl"]         := aDef[6]
+
+        oHelper:setCacheHeaders(aDef[6])
+        oRest:setResponse(oHelper:getResponse(jBody))
+    CATCH oError
+        oHelper:serverError("TDashPcpApi:breakdown", oError:description)
+    ENDTRY
+return .T.
+
+/*/{Protheus.doc} getList
+GET /tdash/v1/pcp/list/:id?page=1&pageSize=20[&dateFrom&dateTo]
+pcp.po_late: OPs firmes abertas e atrasadas, da entrega mais antiga para a mais recente (posição de hoje).
+pcp.material_orders: balanço de matéria-prima das OPs encerradas no período, da maior perda para a menor.
+@type method
+@author TDash
+@since 21/10/2026
+@return logical, sempre .T.
+/*/
+method getList() class TDashPcpApi
+    local oRequest  := tdash.core.TDashRequest():new() as object
+    local oHelper   := tdash.core.TDashResponseHelper():new() as object
+    local oPeriod   := tdash.core.TDashPeriod():new() as object
+    local oRepo     := TDashPcpRepository():new() as object
+    local jBody     as json
+    local aDef      := {} as array
+    local aColumns  := {} as array
+    local cId       := oRequest:path("id") as character
+    local nPage     := 0 as numeric
+    local nPageSize := 0 as numeric
+
+    aDef := tdash.core.u_findIndicator(pcpCatalog(), cId, "list")
+    if Len(aDef) == 0
+        oHelper:notFound(cId, "pcp")
+        return .T.
+    endIf
+
+    nPage     := tdash.core.u_parseInt(oRequest:query("page"), 1, 1, 100000)
+    nPageSize := tdash.core.u_parseInt(oRequest:query("pageSize"), DEFAULT_PAGE_SIZE, 1, 100)
+    if nPage < 0 .or. nPageSize < 0
+        oHelper:badRequest("page deve ser maior que zero e pageSize entre 1 e 100.")
+        return .T.
+    endIf
+
+    if cId == "pcp.material_orders" .and. !oPeriod:fromQuery(oRequest:query("dateFrom"), oRequest:query("dateTo"), "none", Date())
+        oHelper:badRequest(oPeriod:cError)
+        return .T.
+    endIf
+
+    aAdd(aColumns, tdash.core.u_jsonColumn("document", "Ordem de produção", "text"))
+    aAdd(aColumns, tdash.core.u_jsonColumn("party", "Produto", "text"))
+    aAdd(aColumns, tdash.core.u_jsonColumn("product", "Código", "text"))
+    if cId == "pcp.material_orders"
+        aAdd(aColumns, tdash.core.u_jsonColumn("closedAt", "Encerrada em", "date"))
+        aAdd(aColumns, tdash.core.u_jsonColumn("reserved", "Empenhado", "QTY"))
+        aAdd(aColumns, tdash.core.u_jsonColumn("consumed", "Consumido", "QTY"))
+        aAdd(aColumns, tdash.core.u_jsonColumn("produced", "Produzido", "QTY"))
+        aAdd(aColumns, tdash.core.u_jsonColumn("loss", "Perda de material", "QTY"))
+        aAdd(aColumns, tdash.core.u_jsonColumn("lossRate", "Perda (% do consumido)", "PCT"))
+        aAdd(aColumns, tdash.core.u_jsonColumn("returned", "Devolvido ao estoque", "QTY"))
+    else
+        aAdd(aColumns, tdash.core.u_jsonColumn("dueDate", "Entrega prevista", "date"))
+        aAdd(aColumns, tdash.core.u_jsonColumn("quantity", "Planejada", "QTY"))
+        aAdd(aColumns, tdash.core.u_jsonColumn("produced", "Produzida", "QTY"))
+    endIf
+
+    TRY
+        if cId == "pcp.material_orders"
+            jBody := materialPage(::materials(oPeriod:dFrom, oPeriod:dTo), nPage, nPageSize)
+        else
+            jBody := oRepo:lateOrderItems(Date(), nPage, nPageSize)
+        endIf
+        jBody["columns"] := aColumns
+
+        oHelper:setCacheHeaders(aDef[6])
+        oRest:setResponse(oHelper:getResponse(jBody))
+    CATCH oError
+        oHelper:serverError("TDashPcpApi:list", oError:description)
+    ENDTRY
+return .T.
+
+/*/{Protheus.doc} kpiValue
+Calcula o valor de um cartão.
+@type method
+@author TDash
+@since 21/10/2026
+@param cId, character, id do indicador
+@param dFrom, date, início do período
+@param dTo, date, fim do período
+@return numeric, valor
+/*/
+method kpiValue(cId as character, dFrom as date, dTo as date) as numeric class TDashPcpApi
+    local oRepo   := TDashPcpRepository():new() as object
+    local aTotals := {} as array
+    local nValue  := 0 as numeric
+
+    do case
+        case cId == "pcp.po_open"
+            nValue := oRepo:openOrders()
+        case cId == "pcp.po_late"
+            nValue := oRepo:lateOrders(Date())
+        case cId == "pcp.po_closed"
+            nValue := oRepo:closedOrders(dFrom, dTo)
+        case cId == "pcp.plan_attainment"
+            aTotals := oRepo:planTotals(dFrom, dTo)
+            if aTotals[1] > 0
+                nValue := (aTotals[2] / aTotals[1]) * 100
+            endIf
+        case cId == "pcp.losses"
+            aTotals := oRepo:productionTotals(dFrom, dTo)
+            if aTotals[1] + aTotals[2] > 0
+                nValue := (aTotals[2] / (aTotals[1] + aTotals[2])) * 100
+            endIf
+        case cId == "pcp.hours"
+            nValue := Round(tdash.core.u_sumColumn(oRepo:timeEntries(dFrom, dTo), 5), 2)
+        otherwise // pcp.material_*
+            nValue := materialValue(cId, tdash.pcp.u_materialTotals(::materials(dFrom, dTo)))
+    endCase
+return nValue
+
+/*/{Protheus.doc} materials
+Balanço de matéria-prima das OPs encerradas no período, guardado para não repetir as consultas na mesma requisição
+(os cartões de matéria-prima usam o mesmo resultado).
+@type method
+@author TDash
+@since 22/10/2026
+@param dFrom, date, início
+@param dTo, date, fim
+@return array, OPs (json) de TDashPcpRepository:closedOrderMaterials
+/*/
+method materials(dFrom as date, dTo as date) as array class TDashPcpApi
+    local cKey  := DToS(dFrom) + DToS(dTo) as character
+    local oRepo as object
+
+    if !(::cMaterialKey == cKey)
+        oRepo          := TDashPcpRepository():new()
+        ::aMaterial    := oRepo:closedOrderMaterials(dFrom, dTo)
+        ::cMaterialKey := cKey
+    endIf
+return ::aMaterial
+
+/*/{Protheus.doc} materialValue
+Valor de um cartão de matéria-prima a partir dos totais.
+@type static function
+@author TDash
+@since 22/10/2026
+@param cId, character, id do indicador
+@param jTotals, json, totais de u_materialTotals
+@return numeric, valor
+/*/
+static function materialValue(cId as character, jTotals as json) as numeric
+    local nValue := 0 as numeric
+
+    do case
+        case cId == "pcp.material_reserved"
+            nValue := jTotals["reserved"]
+        case cId == "pcp.material_consumed"
+            nValue := jTotals["consumed"]
+        case cId == "pcp.material_produced"
+            nValue := jTotals["produced"]
+        case cId == "pcp.material_loss"
+            nValue := jTotals["loss"]
+        case cId == "pcp.material_loss_rate"
+            nValue := tdash.pcp.u_lossRate(jTotals["loss"], jTotals["consumed"])
+        case cId == "pcp.material_returned"
+            nValue := jTotals["returned"]
+    endCase
+return Round(nValue, 3)
+
+/*/{Protheus.doc} materialWarnings
+Avisos sobre o que ficou fora do balanço de matéria-prima.
+@type static function
+@author TDash
+@since 22/10/2026
+@param jTotals, json, totais de u_materialTotals
+@return array, textos
+/*/
+static function materialWarnings(jTotals as json) as array
+    local aWarning := {} as array
+
+    if jTotals["otherUnit"] > 0
+        aAdd(aWarning, cValToChar(jTotals["otherUnit"]) + " empenho(s) com unidade diferente da do produto ficaram fora da conta.")
+    endIf
+    if jTotals["skipped"] > 0
+        aAdd(aWarning, cValToChar(jTotals["skipped"]) + " OP(s) encerrada(s) sem empenho nem consumo na unidade do produto ficaram fora da conta.")
+    endIf
+return aWarning
+
+/*/{Protheus.doc} lossByProduct
+Perda de material (consumido - produzido) por produto, só das OPs que entram no balanço.
+@type static function
+@author TDash
+@since 22/10/2026
+@param aOrders, array, OPs (json)
+@return array, { { produto, descrição, perda }, ... } da maior perda para a menor
+/*/
+static function lossByProduct(aOrders as array) as array
+    local aRows := {} as array
+    local nPos  := 0 as numeric
+    local nX    := 0 as numeric
+
+    for nX := 1 to Len(aOrders)
+        if tdash.pcp.u_materialCounts(aOrders[nX])
+            nPos := AScan(aRows, {|x| x[1] == aOrders[nX]["product"]})
+            if nPos == 0
+                aAdd(aRows, { aOrders[nX]["product"], aOrders[nX]["label"], 0 })
+                nPos := Len(aRows)
+            endIf
+            aRows[nPos][3] += aOrders[nX]["consumed"] - aOrders[nX]["produced"]
+        endIf
+    next nX
+
+    aSort(aRows, , , {|a, b| a[3] > b[3]})
+return aRows
+
+/*/{Protheus.doc} productivityRows
+Produção por hora produtiva de cada recurso (H6_QTDPROD ÷ horas produtivas). Recursos sem hora produtiva ficam fora.
+@type static function
+@author TDash
+@since 22/10/2026
+@param aEntries, array, linhas de TDashPcpRepository:timeEntries
+@return array, { { recurso, rótulo, quantidade por hora }, ... } da maior para a menor
+/*/
+static function productivityRows(aEntries as array) as array
+    local aSums := {} as array
+    local aRows := {} as array
+    local nPos  := 0 as numeric
+    local nX    := 0 as numeric
+
+    for nX := 1 to Len(aEntries)
+        nPos := AScan(aSums, {|x| x[1] == aEntries[nX][2]})
+        if nPos == 0
+            aAdd(aSums, { aEntries[nX][2], aEntries[nX][3], 0, 0 })
+            nPos := Len(aSums)
+        endIf
+        if aEntries[nX][4]
+            aSums[nPos][3] += aEntries[nX][5]
+        endIf
+        aSums[nPos][4] += aEntries[nX][6]
+    next nX
+
+    for nX := 1 to Len(aSums)
+        if aSums[nX][3] > 0
+            aAdd(aRows, { aSums[nX][1], aSums[nX][2], Round(aSums[nX][4] / aSums[nX][3], 2) })
+        endIf
+    next nX
+
+    aSort(aRows, , , {|a, b| a[3] > b[3]})
+return aRows
+
+/*/{Protheus.doc} materialPage
+Página da lista de balanço de matéria-prima por OP, da maior perda para a menor.
+@type static function
+@author TDash
+@since 22/10/2026
+@param aOrders, array, OPs (json)
+@param nPage, numeric, página (a partir de 1)
+@param nPageSize, numeric, itens por página
+@return json, { items, total, hasNext }
+/*/
+static function materialPage(aOrders as array, nPage as numeric, nPageSize as numeric) as json
+    local jResult  := jsonObject():new() as json
+    local jItem    as json
+    local aSource  := {} as array
+    local aItems   := {} as array
+    local cOp      := "" as character
+    local nLoss    := 0 as numeric
+    local nX       := 0 as numeric
+
+    for nX := 1 to Len(aOrders)
+        if tdash.pcp.u_materialCounts(aOrders[nX])
+            aAdd(aSource, aOrders[nX])
+        endIf
+    next nX
+    aSort(aSource, , , {|a, b| (a["consumed"] - a["produced"]) > (b["consumed"] - b["produced"])})
+
+    for nX := ((nPage - 1) * nPageSize) + 1 to Min(nPage * nPageSize, Len(aSource))
+        cOp   := aSource[nX]["op"]
+        nLoss := aSource[nX]["consumed"] - aSource[nX]["produced"]
+
+        jItem := jsonObject():new()
+        jItem["document"] := "OP " + Left(cOp, 6) + "." + SubStr(cOp, 7, 2) + "." + SubStr(cOp, 9, 3)
+        if !Empty(SubStr(cOp, 12, 3))
+            jItem["document"] += "." + AllTrim(SubStr(cOp, 12, 3))
+        endIf
+        jItem["party"]    := aSource[nX]["label"]
+        jItem["product"]  := aSource[nX]["product"]
+        jItem["closedAt"] := Transform(aSource[nX]["closedAt"], "@R 9999-99-99")
+        jItem["reserved"] := Round(aSource[nX]["reserved"], 3)
+        jItem["consumed"] := Round(aSource[nX]["consumed"], 3)
+        jItem["produced"] := Round(aSource[nX]["produced"], 3)
+        jItem["loss"]     := Round(nLoss, 3)
+        jItem["lossRate"] := tdash.pcp.u_lossRate(nLoss, aSource[nX]["consumed"])
+        jItem["returned"] := Round(aSource[nX]["reserved"] - aSource[nX]["consumed"], 3)
+        aAdd(aItems, jItem)
+    next nX
+
+    jResult["items"]   := aItems
+    jResult["total"]   := Len(aSource)
+    jResult["hasNext"] := (nPage * nPageSize) < Len(aSource)
+return jResult
+
+/*/{Protheus.doc} pcpCatalog
+Catálogo da Produção: { id, tipos, título, unidade, sentido, ttl }.
+@type static function
+@author TDash
+@since 21/10/2026
+@return array, indicadores
+/*/
+static function pcpCatalog() as array
+return {;
+    { "pcp.po_open",                    { "kpi" },           "OPs abertas",                     "COUNT", "neutral",      TTL_OP  },;
+    { "pcp.po_late",                    { "kpi", "list" },   "OPs atrasadas",                   "COUNT", "down_is_good", TTL_OP  },;
+    { "pcp.po_closed",                  { "kpi" },           "OPs encerradas",                  "COUNT", "up_is_good",   TTL_TAT },;
+    { "pcp.plan_attainment",            { "kpi" },           "Atingimento do plano",            "PCT",   "up_is_good",   TTL_TAT },;
+    { "pcp.production_daily",           { "series" },        "Produção",                        "QTY",   "up_is_good",   TTL_OP  },;
+    { "pcp.losses",                     { "kpi", "series" }, "Perdas na produção",              "PCT",   "down_is_good", TTL_TAT },;
+    { "pcp.hours_by_resource",          { "breakdown" },     "Horas por recurso",               "HOURS", "neutral",      TTL_EST },;
+    { "pcp.hours",                      { "kpi", "series" }, "Horas apontadas",                 "HOURS", "neutral",      TTL_TAT },;
+    { "pcp.productivity",               { "breakdown" },     "Produção por hora",               "PER_HOUR", "up_is_good",   TTL_TAT },;
+    { "pcp.top_products",               { "breakdown" },     "Produtos mais produzidos",        "QTY",   "neutral",      TTL_TAT },;
+    { "pcp.material_reserved",          { "kpi" },           "Matéria-prima empenhada",         "QTY",   "neutral",      TTL_TAT },;
+    { "pcp.material_consumed",          { "kpi" },           "Matéria-prima consumida",         "QTY",   "neutral",      TTL_TAT },;
+    { "pcp.material_produced",          { "kpi" },           "Produzido nas OPs encerradas",    "QTY",   "up_is_good",   TTL_TAT },;
+    { "pcp.material_loss",              { "kpi" },           "Perda de material",               "QTY",   "down_is_good", TTL_TAT },;
+    { "pcp.material_loss_rate",         { "kpi" },           "Perda de material (%)",           "PCT",   "down_is_good", TTL_TAT },;
+    { "pcp.material_returned",          { "kpi" },           "Empenho devolvido ao estoque",    "QTY",   "neutral",      TTL_TAT },;
+    { "pcp.material_loss_by_product",   { "breakdown" },     "Perda de material por produto",   "QTY",   "down_is_good", TTL_TAT },;
+    { "pcp.material_orders",            { "list" },          "Matéria-prima por OP",            "QTY",   "neutral",      TTL_TAT } }

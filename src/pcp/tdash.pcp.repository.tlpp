@@ -1,0 +1,645 @@
+#include 'tlpp-core.th'
+#include 'totvs.ch'
+
+namespace tdash.pcp
+
+/*/{Protheus.doc} TDashPcpRepository
+Consultas dos indicadores de Produção (SC2, SD3, SD4, SH6, SH1, SB1).
+OP aberta = OP firme (C2_TPOP = 'F') sem data de encerramento real (C2_DATRF em branco); as previstas ficam de fora.
+Produção e perdas vêm da SD3 (fonte principal): apontamentos de produção (D3_CF = PR*) não estornados;
+a perda é D3_PERDA. A SH6 alimenta as horas apontadas e a produtividade por recurso. O balanço de matéria-prima
+compara o empenho (SD4) com o consumo (requisições menos devoluções da SD3) das OPs encerradas.
+Regras: docs/10-catalogo-de-indicadores.md (Produção).
+@type class
+@author TDash
+@since 21/10/2026
+@version 1.0
+/*/
+class TDashPcpRepository
+    public method new()
+
+    public method openOrders() as numeric
+    public method lateOrders(dToday as date) as numeric
+    public method closedOrders(dFrom as date, dTo as date) as numeric
+    public method planTotals(dFrom as date, dTo as date) as array
+    public method productionTotals(dFrom as date, dTo as date) as array
+    public method productionByDay(dFrom as date, dTo as date) as array
+    public method topProducts(dFrom as date, dTo as date) as array
+    public method hoursByResource(dFrom as date, dTo as date) as array
+    public method timeEntries(dFrom as date, dTo as date) as array
+    public method closedOrderMaterials(dFrom as date, dTo as date) as array
+    public method lateOrderItems(dToday as date, nPage as numeric, nPageSize as numeric) as json
+
+    private method lateFrom() as character
+    private method productionWhere() as character
+    private method bindProduction(oQuery as object, nFirst as numeric, dFrom as date, dTo as date)
+    private method numberOf(cAlias as character, cField as character) as numeric
+    private method closedJoin(cOpField as character) as character
+    private method bindClosed(oQuery as object, dFrom as date, dTo as date)
+    private method mergeOrders(oQuery as object, aOrders as array, jIndex as json, cKey as character)
+endclass
+
+method new() class TDashPcpRepository
+return self
+
+/*/{Protheus.doc} openOrders
+Quantidade de OPs firmes abertas.
+@type method
+@author TDash
+@since 21/10/2026
+@return numeric, quantidade
+/*/
+method openOrders() as numeric class TDashPcpRepository
+    local nTotal := 0 as numeric
+    local cQry   := "" as character
+    local oQuery as object
+
+    cQry := " SELECT COUNT(*) TOTAL "
+    cQry += " FROM " + RetSqlName("SC2") + " C2 "
+    cQry += " WHERE C2.C2_FILIAL = ? "
+    cQry += " AND C2.C2_TPOP = 'F' "
+    cQry += " AND C2.C2_DATRF = ' ' "
+    cQry += " AND C2.D_E_L_E_T_ = ' ' "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    oQuery:setString(1, FWxFilial("SC2"))
+    if oQuery:open()
+        nTotal := ::numberOf(oQuery:getAlias(), "TOTAL")
+        oQuery:close()
+    endIf
+return nTotal
+
+/*/{Protheus.doc} lateOrders
+Quantidade de OPs firmes abertas com entrega prevista anterior a hoje.
+@type method
+@author TDash
+@since 21/10/2026
+@param dToday, date, data de corte (hoje)
+@return numeric, quantidade
+/*/
+method lateOrders(dToday as date) as numeric class TDashPcpRepository
+    local nTotal := 0 as numeric
+    local oQuery as object
+
+    oQuery := tdash.core.TDashQuery():new(" SELECT COUNT(*) TOTAL " + ::lateFrom())
+    oQuery:setString(1, FWxFilial("SB1"))
+    oQuery:setString(2, FWxFilial("SC2"))
+    oQuery:setString(3, DToS(dToday))
+    if oQuery:open()
+        nTotal := ::numberOf(oQuery:getAlias(), "TOTAL")
+        oQuery:close()
+    endIf
+return nTotal
+
+/*/{Protheus.doc} closedOrders
+Quantidade de OPs firmes encerradas no período (C2_DATRF).
+@type method
+@author TDash
+@since 21/10/2026
+@param dFrom, date, início
+@param dTo, date, fim
+@return numeric, quantidade
+/*/
+method closedOrders(dFrom as date, dTo as date) as numeric class TDashPcpRepository
+    local nTotal := 0 as numeric
+    local cQry   := "" as character
+    local oQuery as object
+
+    cQry := " SELECT COUNT(*) TOTAL "
+    cQry += " FROM " + RetSqlName("SC2") + " C2 "
+    cQry += " WHERE C2.C2_FILIAL = ? "
+    cQry += " AND C2.C2_TPOP = 'F' "
+    cQry += " AND C2.C2_DATRF BETWEEN ? AND ? "
+    cQry += " AND C2.D_E_L_E_T_ = ' ' "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    oQuery:setString(1, FWxFilial("SC2"))
+    oQuery:setString(2, DToS(dFrom))
+    oQuery:setString(3, DToS(dTo))
+    if oQuery:open()
+        nTotal := ::numberOf(oQuery:getAlias(), "TOTAL")
+        oQuery:close()
+    endIf
+return nTotal
+
+/*/{Protheus.doc} planTotals
+Quantidade planejada (C2_QUANT) e produzida (C2_QUJE) das OPs firmes com entrega prevista no período.
+@type method
+@author TDash
+@since 21/10/2026
+@param dFrom, date, início (C2_DATPRF)
+@param dTo, date, fim
+@return array, { planejada, produzida }
+/*/
+method planTotals(dFrom as date, dTo as date) as array class TDashPcpRepository
+    local aTotals := { 0, 0 } as array
+    local cQry    := "" as character
+    local cAlias  := "" as character
+    local oQuery  as object
+
+    cQry := " SELECT SUM(C2.C2_QUANT) PLANEJADA, SUM(C2.C2_QUJE) PRODUZIDA "
+    cQry += " FROM " + RetSqlName("SC2") + " C2 "
+    cQry += " WHERE C2.C2_FILIAL = ? "
+    cQry += " AND C2.C2_TPOP = 'F' "
+    cQry += " AND C2.C2_DATPRF BETWEEN ? AND ? "
+    cQry += " AND C2.D_E_L_E_T_ = ' ' "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    oQuery:setString(1, FWxFilial("SC2"))
+    oQuery:setString(2, DToS(dFrom))
+    oQuery:setString(3, DToS(dTo))
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        aTotals[1] := ::numberOf(cAlias, "PLANEJADA")
+        aTotals[2] := ::numberOf(cAlias, "PRODUZIDA")
+        oQuery:close()
+    endIf
+return aTotals
+
+/*/{Protheus.doc} productionTotals
+Quantidade produzida (D3_QUANT) e perdida (D3_PERDA) nos apontamentos de produção do período.
+@type method
+@author TDash
+@since 21/10/2026
+@param dFrom, date, início (D3_EMISSAO)
+@param dTo, date, fim
+@return array, { produzida, perdida }
+/*/
+method productionTotals(dFrom as date, dTo as date) as array class TDashPcpRepository
+    local aTotals := { 0, 0 } as array
+    local cAlias  := "" as character
+    local oQuery  as object
+
+    oQuery := tdash.core.TDashQuery():new(" SELECT SUM(D3.D3_QUANT) PRODUZIDA, SUM(D3.D3_PERDA) PERDIDA FROM " + RetSqlName("SD3") + " D3 " + ::productionWhere())
+    ::bindProduction(oQuery, 1, dFrom, dTo)
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        aTotals[1] := ::numberOf(cAlias, "PRODUZIDA")
+        aTotals[2] := ::numberOf(cAlias, "PERDIDA")
+        oQuery:close()
+    endIf
+return aTotals
+
+/*/{Protheus.doc} productionByDay
+Produção e perda por dia de emissão.
+@type method
+@author TDash
+@since 21/10/2026
+@param dFrom, date, início
+@param dTo, date, fim
+@return array, { { data AAAAMMDD, produzida, perdida }, ... }
+/*/
+method productionByDay(dFrom as date, dTo as date) as array class TDashPcpRepository
+    local aRows  := {} as array
+    local cAlias := "" as character
+    local oQuery as object
+
+    oQuery := tdash.core.TDashQuery():new(;
+        " SELECT D3.D3_EMISSAO DIA, SUM(D3.D3_QUANT) PRODUZIDA, SUM(D3.D3_PERDA) PERDIDA " + ;
+        " FROM " + RetSqlName("SD3") + " D3 " + ::productionWhere() + ;
+        " GROUP BY D3.D3_EMISSAO ORDER BY D3.D3_EMISSAO ")
+    ::bindProduction(oQuery, 1, dFrom, dTo)
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof())
+            aAdd(aRows, { (cAlias)->DIA, (cAlias)->PRODUZIDA, (cAlias)->PERDIDA })
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+return aRows
+
+/*/{Protheus.doc} topProducts
+Produtos mais produzidos no período, do maior para o menor.
+@type method
+@author TDash
+@since 21/10/2026
+@param dFrom, date, início
+@param dTo, date, fim
+@return array, { { código, descrição, quantidade }, ... }
+/*/
+method topProducts(dFrom as date, dTo as date) as array class TDashPcpRepository
+    local aRows  := {} as array
+    local cAlias := "" as character
+    local cLabel := "" as character
+    local oQuery as object
+
+    oQuery := tdash.core.TDashQuery():new(;
+        " SELECT D3.D3_COD CHAVE, MAX(B1.B1_DESC) NOME, SUM(D3.D3_QUANT) VALOR " + ;
+        " FROM " + RetSqlName("SD3") + " D3 " + ;
+        " LEFT JOIN " + RetSqlName("SB1") + " B1 ON B1.B1_FILIAL = ? AND B1.B1_COD = D3.D3_COD AND B1.D_E_L_E_T_ = ' ' " + ;
+        ::productionWhere() + ;
+        " GROUP BY D3.D3_COD ORDER BY SUM(D3.D3_QUANT) DESC ")
+    oQuery:setString(1, FWxFilial("SB1"))
+    ::bindProduction(oQuery, 2, dFrom, dTo)
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof())
+            cLabel := AllTrim((cAlias)->NOME)
+            if Empty(cLabel)
+                cLabel := AllTrim((cAlias)->CHAVE)
+            endIf
+            aAdd(aRows, { AllTrim((cAlias)->CHAVE), cLabel, (cAlias)->VALOR })
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+return aRows
+
+/*/{Protheus.doc} hoursByResource
+Horas apontadas por recurso na SH6 no período (produtivas e improdutivas). Vazio quando a SH6 não tem apontamento:
+a fonte principal da produção é a SD3.
+@type method
+@author TDash
+@since 21/10/2026
+@param dFrom, date, início (H6_DTAPONT)
+@param dTo, date, fim
+@return array, { { código, rótulo, horas }, ... } do maior para o menor
+/*/
+method hoursByResource(dFrom as date, dTo as date) as array class TDashPcpRepository
+    local aRows    := {} as array
+    local aEntries := ::timeEntries(dFrom, dTo) as array
+    local nPos     := 0 as numeric
+    local nX       := 0 as numeric
+
+    for nX := 1 to Len(aEntries)
+        nPos := AScan(aRows, {|x| x[1] == aEntries[nX][2]})
+        if nPos == 0
+            aAdd(aRows, { aEntries[nX][2], aEntries[nX][3], 0 })
+            nPos := Len(aRows)
+        endIf
+        aRows[nPos][3] += aEntries[nX][5]
+    next nX
+
+    aSort(aRows, , , {|a, b| a[3] > b[3]})
+return aRows
+
+/*/{Protheus.doc} timeEntries
+Apontamentos da SH6 no período, somados por dia, recurso e tipo. H6_TEMPO é texto e pode estar em hora normal ou
+centesimal (H6_TIPOTEM; sem ele vale o MV_TPHR). H6_TIPO "I" é hora improdutiva; os demais contam como produtivos.
+@type method
+@author TDash
+@since 22/10/2026
+@param dFrom, date, início (H6_DTAPONT)
+@param dTo, date, fim
+@return array, { { dia AAAAMMDD, recurso, rótulo, produtiva (lógico), horas, quantidade produzida }, ... }
+/*/
+method timeEntries(dFrom as date, dTo as date) as array class TDashPcpRepository
+    local aRows     := {} as array
+    local cQry      := "" as character
+    local cAlias    := "" as character
+    local cCode     := "" as character
+    local cLabel    := "" as character
+    local cTimeType := SuperGetMV("MV_TPHR", .F., "C") as character
+    local lProduct  := .T. as logical
+    local nHours    := 0 as numeric
+    local nPos      := 0 as numeric
+    local oQuery    as object
+
+    cQry := " SELECT H6.H6_DTAPONT DIA, H6.H6_RECURSO RECURSO, H6.H6_TEMPO TEMPO, H6.H6_TIPOTEM TIPOTEM, H6.H6_TIPO TIPO, "
+    cQry += " COUNT(*) QTD, SUM(H6.H6_QTDPROD) PRODUZIDA, MAX(H1.H1_DESCRI) DESCRICAO "
+    cQry += " FROM " + RetSqlName("SH6") + " H6 "
+    cQry += " LEFT JOIN " + RetSqlName("SH1") + " H1 ON H1.H1_FILIAL = ? AND H1.H1_CODIGO = H6.H6_RECURSO AND H1.D_E_L_E_T_ = ' ' "
+    cQry += " WHERE H6.H6_FILIAL = ? "
+    cQry += " AND H6.H6_DTAPONT BETWEEN ? AND ? "
+    cQry += " AND H6.D_E_L_E_T_ = ' ' "
+    cQry += " GROUP BY H6.H6_DTAPONT, H6.H6_RECURSO, H6.H6_TEMPO, H6.H6_TIPOTEM, H6.H6_TIPO "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    oQuery:setString(1, FWxFilial("SH1"))
+    oQuery:setString(2, FWxFilial("SH6"))
+    oQuery:setString(3, DToS(dFrom))
+    oQuery:setString(4, DToS(dTo))
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof())
+            cCode  := AllTrim((cAlias)->RECURSO)
+            cLabel := AllTrim((cAlias)->DESCRICAO)
+            if Empty(cLabel)
+                cLabel := cCode
+            endIf
+            lProduct := AllTrim((cAlias)->TIPO) <> "I"
+            nHours   := tdash.pcp.u_timeToHours((cAlias)->TEMPO, tdash.pcp.u_isCentesimal((cAlias)->TIPOTEM, cTimeType)) * (cAlias)->QTD
+
+            // Mesmo dia, recurso e tipo com tempos diferentes viram uma linha só
+            nPos := AScan(aRows, {|x| x[1] == (cAlias)->DIA .and. x[2] == cCode .and. x[4] == lProduct})
+            if nPos == 0
+                aAdd(aRows, { (cAlias)->DIA, cCode, cLabel, lProduct, 0, 0 })
+                nPos := Len(aRows)
+            endIf
+            aRows[nPos][5] += nHours
+            aRows[nPos][6] += (cAlias)->PRODUZIDA
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+return aRows
+
+/*/{Protheus.doc} closedOrderMaterials
+Balanço de matéria-prima de cada OP firme encerrada no período (C2_DATRF):
+- produced: apontamentos de produção da OP (SD3, D3_CF = PR*, sem estorno), em toda a vida da OP;
+- reserved: quantidade empenhada original (D4_QTDEORI) dos componentes;
+- consumed: requisições (D3_CF = RE*) menos devoluções (D3_CF = DE*) para a OP, sem estorno.
+Mão de obra (B1_TIPO = "MO") fica fora. Componentes com unidade diferente da do produto (C2_UM) não entram nas somas;
+os empenhos nessa situação são contados em otherUnit.
+@type method
+@author TDash
+@since 22/10/2026
+@param dFrom, date, início (C2_DATRF)
+@param dTo, date, fim
+@return array, OPs (json) { op, product, label, closedAt, produced, reserved, consumed, otherUnit }
+/*/
+method closedOrderMaterials(dFrom as date, dTo as date) as array class TDashPcpRepository
+    local aOrders := {} as array
+    local jIndex  := jsonObject():new() as json
+    local jOrder  as json
+    local cQry    := "" as character
+    local cAlias  := "" as character
+    local cOp     := "" as character
+    local cLabel  := "" as character
+    local oQuery  as object
+
+    cQry := " SELECT C2.C2_NUM NUM, C2.C2_ITEM ITEM, C2.C2_SEQUEN SEQUEN, C2.C2_ITEMGRD ITEMGRD, C2.C2_PRODUTO PRODUTO, "
+    cQry += " C2.C2_DATRF ENCERRADA, B1.B1_DESC DESCRICAO "
+    cQry += " FROM " + RetSqlName("SC2") + " C2 "
+    cQry += " LEFT JOIN " + RetSqlName("SB1") + " B1 ON B1.B1_FILIAL = ? AND B1.B1_COD = C2.C2_PRODUTO AND B1.D_E_L_E_T_ = ' ' "
+    cQry += " WHERE C2.C2_FILIAL = ? "
+    cQry += " AND C2.C2_TPOP = 'F' "
+    cQry += " AND C2.C2_DATRF BETWEEN ? AND ? "
+    cQry += " AND C2.D_E_L_E_T_ = ' ' "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    oQuery:setString(1, FWxFilial("SB1"))
+    oQuery:setString(2, FWxFilial("SC2"))
+    oQuery:setString(3, DToS(dFrom))
+    oQuery:setString(4, DToS(dTo))
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof())
+            // Mesma composição de D3_OP e D4_OP: número + item + sequência + item de grade
+            cOp    := PadR((cAlias)->NUM, 6) + PadR((cAlias)->ITEM, 2) + PadR((cAlias)->SEQUEN, 3) + PadR((cAlias)->ITEMGRD, 3)
+            cLabel := AllTrim((cAlias)->DESCRICAO)
+            if Empty(cLabel)
+                cLabel := AllTrim((cAlias)->PRODUTO)
+            endIf
+
+            jOrder := jsonObject():new()
+            jOrder["op"]        := cOp
+            jOrder["product"]   := AllTrim((cAlias)->PRODUTO)
+            jOrder["label"]     := cLabel
+            jOrder["closedAt"]  := (cAlias)->ENCERRADA
+            jOrder["produced"]  := 0
+            jOrder["reserved"]  := 0
+            jOrder["consumed"]  := 0
+            jOrder["otherUnit"] := 0
+            aAdd(aOrders, jOrder)
+            jIndex[cOp] := Len(aOrders)
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+
+    if Len(aOrders) == 0
+        return aOrders
+    endIf
+
+    // Produzido
+    cQry := " SELECT D3.D3_OP OP, SUM(D3.D3_QUANT) VALOR, 0 FORA "
+    cQry += " FROM " + RetSqlName("SD3") + " D3 "
+    cQry += ::closedJoin("D3.D3_OP")
+    cQry += " WHERE D3.D3_FILIAL = ? "
+    cQry += " AND D3.D3_CF LIKE 'PR%' "
+    cQry += " AND D3.D3_ESTORNO <> 'S' "
+    cQry += " AND D3.D_E_L_E_T_ = ' ' "
+    cQry += " GROUP BY D3.D3_OP "
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    ::bindClosed(oQuery, dFrom, dTo)
+    oQuery:setString(4, FWxFilial("SD3"))
+    ::mergeOrders(oQuery, aOrders, jIndex, "produced")
+
+    // Empenhado (sem mão de obra; só os componentes na unidade do produto)
+    cQry := " SELECT D4.D4_OP OP, "
+    cQry += " SUM(CASE WHEN B1.B1_UM = C2.C2_UM THEN D4.D4_QTDEORI ELSE 0 END) VALOR, "
+    cQry += " SUM(CASE WHEN B1.B1_UM = C2.C2_UM THEN 0 ELSE 1 END) FORA "
+    cQry += " FROM " + RetSqlName("SD4") + " D4 "
+    cQry += ::closedJoin("D4.D4_OP")
+    cQry += " INNER JOIN " + RetSqlName("SB1") + " B1 ON B1.B1_FILIAL = ? AND B1.B1_COD = D4.D4_COD AND B1.B1_TIPO <> 'MO' AND B1.D_E_L_E_T_ = ' ' "
+    cQry += " WHERE D4.D4_FILIAL = ? "
+    cQry += " AND D4.D_E_L_E_T_ = ' ' "
+    cQry += " GROUP BY D4.D4_OP "
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    ::bindClosed(oQuery, dFrom, dTo)
+    oQuery:setString(4, FWxFilial("SB1"))
+    oQuery:setString(5, FWxFilial("SD4"))
+    ::mergeOrders(oQuery, aOrders, jIndex, "reserved")
+
+    // Consumido = requisições - devoluções para a OP (sem mão de obra; só na unidade do produto)
+    cQry := " SELECT D3.D3_OP OP, "
+    cQry += " SUM(CASE WHEN B1.B1_UM <> C2.C2_UM THEN 0 WHEN D3.D3_CF LIKE 'RE%' THEN D3.D3_QUANT ELSE 0 - D3.D3_QUANT END) VALOR, "
+    cQry += " 0 FORA "
+    cQry += " FROM " + RetSqlName("SD3") + " D3 "
+    cQry += ::closedJoin("D3.D3_OP")
+    cQry += " INNER JOIN " + RetSqlName("SB1") + " B1 ON B1.B1_FILIAL = ? AND B1.B1_COD = D3.D3_COD AND B1.B1_TIPO <> 'MO' AND B1.D_E_L_E_T_ = ' ' "
+    cQry += " WHERE D3.D3_FILIAL = ? "
+    cQry += " AND ( D3.D3_CF LIKE 'RE%' OR D3.D3_CF LIKE 'DE%' ) "
+    cQry += " AND D3.D3_ESTORNO <> 'S' "
+    cQry += " AND D3.D_E_L_E_T_ = ' ' "
+    cQry += " GROUP BY D3.D3_OP "
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    ::bindClosed(oQuery, dFrom, dTo)
+    oQuery:setString(4, FWxFilial("SB1"))
+    oQuery:setString(5, FWxFilial("SD3"))
+    ::mergeOrders(oQuery, aOrders, jIndex, "consumed")
+return aOrders
+
+/*/{Protheus.doc} lateOrderItems
+OPs firmes abertas e atrasadas, da entrega mais antiga para a mais recente, paginadas.
+@type method
+@author TDash
+@since 21/10/2026
+@param dToday, date, data de corte (hoje)
+@param nPage, numeric, página (a partir de 1)
+@param nPageSize, numeric, itens por página
+@return json, { items, hasNext, total }
+/*/
+method lateOrderItems(dToday as date, nPage as numeric, nPageSize as numeric) as json class TDashPcpRepository
+    local jResult := jsonObject():new() as json
+    local jItem   as json
+    local aItems  := {} as array
+    local cQry    := "" as character
+    local cAlias  := "" as character
+    local cLabel  := "" as character
+    local nTotal  := 0 as numeric
+    local oQuery  as object
+
+    nTotal := ::lateOrders(dToday)
+
+    cQry := " SELECT C2.C2_NUM NUM, C2.C2_ITEM ITEM, C2.C2_SEQUEN SEQUEN, C2.C2_PRODUTO PRODUTO, "
+    cQry += " C2.C2_QUANT QUANT, C2.C2_QUJE QUJE, C2.C2_DATPRF ENTREGA, B1.B1_DESC DESCRICAO "
+    cQry += ::lateFrom()
+    cQry += " ORDER BY C2.C2_DATPRF, C2.C2_NUM, C2.C2_ITEM, C2.C2_SEQUEN "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    oQuery:setString(1, FWxFilial("SB1"))
+    oQuery:setString(2, FWxFilial("SC2"))
+    oQuery:setString(3, DToS(dToday))
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        (cAlias)->(DbSkip((nPage - 1) * nPageSize))
+        while !(cAlias)->(Eof()) .and. Len(aItems) < nPageSize
+            cLabel := AllTrim((cAlias)->DESCRICAO)
+            if Empty(cLabel)
+                cLabel := AllTrim((cAlias)->PRODUTO)
+            endIf
+            jItem := jsonObject():new()
+            jItem["document"] := "OP " + AllTrim((cAlias)->NUM) + "." + AllTrim((cAlias)->ITEM) + "." + AllTrim((cAlias)->SEQUEN)
+            jItem["party"]    := cLabel
+            jItem["product"]  := AllTrim((cAlias)->PRODUTO)
+            jItem["dueDate"]  := Transform((cAlias)->ENTREGA, "@R 9999-99-99")
+            jItem["quantity"] := Round((cAlias)->QUANT, 2)
+            jItem["produced"] := Round((cAlias)->QUJE, 2)
+            aAdd(aItems, jItem)
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+
+    jResult["items"]   := aItems
+    jResult["total"]   := nTotal
+    jResult["hasNext"] := (nPage * nPageSize) < nTotal
+return jResult
+
+/*/{Protheus.doc} lateFrom
+FROM/WHERE das OPs firmes abertas e atrasadas. Binds: SB1 filial, SC2 filial, data de corte.
+@type method
+@author TDash
+@since 21/10/2026
+@return character, cláusulas
+/*/
+method lateFrom() as character class TDashPcpRepository
+    local cFrom := "" as character
+
+    cFrom := " FROM " + RetSqlName("SC2") + " C2 "
+    cFrom += " LEFT JOIN " + RetSqlName("SB1") + " B1 ON B1.B1_FILIAL = ? AND B1.B1_COD = C2.C2_PRODUTO AND B1.D_E_L_E_T_ = ' ' "
+    cFrom += " WHERE C2.C2_FILIAL = ? "
+    cFrom += " AND C2.C2_TPOP = 'F' "
+    cFrom += " AND C2.C2_DATRF = ' ' "
+    cFrom += " AND C2.C2_DATPRF <> ' ' "
+    cFrom += " AND C2.C2_DATPRF < ? "
+    cFrom += " AND C2.D_E_L_E_T_ = ' ' "
+return cFrom
+
+/*/{Protheus.doc} productionWhere
+WHERE dos apontamentos de produção da SD3 (alias D3). Binds: SD3 filial, data inicial, data final.
+@type method
+@author TDash
+@since 21/10/2026
+@return character, cláusula WHERE
+/*/
+method productionWhere() as character class TDashPcpRepository
+    local cWhere := "" as character
+
+    cWhere := " WHERE D3.D3_FILIAL = ? "
+    cWhere += " AND D3.D3_CF LIKE 'PR%' "
+    cWhere += " AND D3.D3_ESTORNO <> 'S' "
+    cWhere += " AND D3.D3_EMISSAO BETWEEN ? AND ? "
+    cWhere += " AND D3.D_E_L_E_T_ = ' ' "
+return cWhere
+
+/*/{Protheus.doc} bindProduction
+Binds de productionWhere a partir da posição indicada.
+@type method
+@author TDash
+@since 21/10/2026
+@param oQuery, object, consulta
+@param nFirst, numeric, posição do primeiro bind (a filial do SD3)
+@param dFrom, date, início
+@param dTo, date, fim
+/*/
+method bindProduction(oQuery as object, nFirst as numeric, dFrom as date, dTo as date) class TDashPcpRepository
+    oQuery:setString(nFirst, FWxFilial("SD3"))
+    oQuery:setString(nFirst + 1, DToS(dFrom))
+    oQuery:setString(nFirst + 2, DToS(dTo))
+return
+
+/*/{Protheus.doc} numberOf
+Valor numérico de um campo da linha atual; 0 quando nulo (ex.: SUM sem linhas).
+@type method
+@author TDash
+@since 21/10/2026
+@return numeric, valor ou 0
+/*/
+method numberOf(cAlias as character, cField as character) as numeric class TDashPcpRepository
+    local nValue := 0 as numeric
+    local xValue
+
+    if !(cAlias)->(Eof())
+        xValue := (cAlias)->(FieldGet(FieldPos(cField)))
+        if valType(xValue) == "N"
+            nValue := xValue
+        endIf
+    endIf
+return nValue
+
+/*/{Protheus.doc} closedJoin
+JOIN com as OPs firmes encerradas no período, pelo campo de OP da tabela (D3_OP, D4_OP). Binds: SC2 filial, data
+inicial e data final de encerramento (posições 1 a 3).
+@type method
+@author TDash
+@since 22/10/2026
+@param cOpField, character, campo com o número da OP (com alias)
+@return character, cláusula INNER JOIN
+/*/
+method closedJoin(cOpField as character) as character class TDashPcpRepository
+    local cConcat := MatiConcat() as character
+    local cJoin   := "" as character
+
+    cJoin := " INNER JOIN " + RetSqlName("SC2") + " C2 ON C2.C2_FILIAL = ? "
+    cJoin += " AND " + cOpField + " = C2.C2_NUM " + cConcat + " C2.C2_ITEM " + cConcat + " C2.C2_SEQUEN " + cConcat + " C2.C2_ITEMGRD "
+    cJoin += " AND C2.C2_TPOP = 'F' "
+    cJoin += " AND C2.C2_DATRF BETWEEN ? AND ? "
+    cJoin += " AND C2.D_E_L_E_T_ = ' ' "
+return cJoin
+
+/*/{Protheus.doc} bindClosed
+Binds de closedJoin (posições 1 a 3).
+@type method
+@author TDash
+@since 22/10/2026
+@param oQuery, object, consulta
+@param dFrom, date, início
+@param dTo, date, fim
+/*/
+method bindClosed(oQuery as object, dFrom as date, dTo as date) class TDashPcpRepository
+    oQuery:setString(1, FWxFilial("SC2"))
+    oQuery:setString(2, DToS(dFrom))
+    oQuery:setString(3, DToS(dTo))
+return
+
+/*/{Protheus.doc} mergeOrders
+Soma o resultado de uma consulta agrupada por OP (colunas OP, VALOR, FORA) no campo cKey de cada OP.
+@type method
+@author TDash
+@since 22/10/2026
+@param oQuery, object, consulta ainda não aberta
+@param aOrders, array, OPs (json)
+@param jIndex, json, posição de cada OP em aOrders
+@param cKey, character, campo que recebe VALOR (produced, reserved, consumed)
+/*/
+method mergeOrders(oQuery as object, aOrders as array, jIndex as json, cKey as character) class TDashPcpRepository
+    local cAlias := "" as character
+    local xPos
+
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof())
+            xPos := jIndex[PadR((cAlias)->OP, 14)]
+            if valType(xPos) == "N"
+                aOrders[xPos][cKey]        += (cAlias)->VALOR
+                aOrders[xPos]["otherUnit"] += (cAlias)->FORA
+            endIf
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+return

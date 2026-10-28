@@ -1,0 +1,118 @@
+#include "tlpp-core.th"
+#include "tlpp-probat.th"
+
+namespace tests.fin
+
+/*/{Protheus.doc} test_tdash_fin_party
+Testes PROBAT das regras da posição de cliente e fornecedor (sem banco): faixas de atraso, código informado e
+junção das lojas.
+Execução: appserver.exe -console -consolelog -run=tlpp.probat.run -env={AMBIENTE}
+@type class
+@author TDash
+@since 22/10/2026
+/*/
+@TestFixture()
+Class test_tdash_fin_party
+    Public Method New() as Object
+
+    @Test('agingBucket: limites de 30, 60, 90 e 180 dias')
+    Public Method agingBucket_Limits() as Logical
+
+    @Test('validPartyKey: só letras e números, até o tamanho do campo')
+    Public Method validPartyKey_Rules() as Logical
+
+    @Test('consolidateStores: crédito por loja soma os limites; históricos pegam o maior')
+    Public Method consolidateStores_PerStore_SumsLimits() as Logical
+
+    @Test('consolidateStores: crédito por cliente usa o limite da primeira loja')
+    Public Method consolidateStores_PerClient_UsesFirstStore() as Logical
+
+    @Test('consolidateStores: média de atraso ponderada pelos pagamentos')
+    Public Method consolidateStores_AverageDelay_WeightedByPayments() as Logical
+EndClass
+
+Method New() as Object Class test_tdash_fin_party
+Return Self
+
+Method agingBucket_Limits() as Logical Class test_tdash_fin_party
+    tlpp.probat.assertEquals(tdash.fin.u_agingBucket(1), 1)
+    tlpp.probat.assertEquals(tdash.fin.u_agingBucket(30), 1)
+    tlpp.probat.assertEquals(tdash.fin.u_agingBucket(31), 2)
+    tlpp.probat.assertEquals(tdash.fin.u_agingBucket(90), 3)
+    tlpp.probat.assertEquals(tdash.fin.u_agingBucket(180), 4)
+    tlpp.probat.assertEquals(tdash.fin.u_agingBucket(181), 5)
+    tlpp.probat.assertEquals(Len(tdash.fin.u_agingBuckets()), 5)
+Return .T.
+
+Method validPartyKey_Rules() as Logical Class test_tdash_fin_party
+    tlpp.probat.assertEquals(tdash.fin.u_validPartyKey("000123", 6), .T.)
+    tlpp.probat.assertEquals(tdash.fin.u_validPartyKey(" C0012 ", 6), .T.)
+    tlpp.probat.assertEquals(tdash.fin.u_validPartyKey("", 6), .F.)
+    tlpp.probat.assertEquals(tdash.fin.u_validPartyKey("0001234", 6), .F.)
+    tlpp.probat.assertEquals(tdash.fin.u_validPartyKey("00'1", 6), .F.)
+    tlpp.probat.assertEquals(tdash.fin.u_validPartyKey("00 1", 6), .F.)
+Return .T.
+
+Method consolidateStores_PerStore_SumsLimits() as Logical Class test_tdash_fin_party
+    local jTotal := tdash.fin.u_consolidateStores({ ;
+        newStore("01", 10000, "20261231", 5000, "20200105", "20261001", 10, 15, 2, 4), ;
+        newStore("02", 20000, "20261130", 8000, "20190310", "20260915", 5, 40, 6, 1) }, "L") as json
+
+    tlpp.probat.assertEquals(jTotal["stores"], 2)
+    tlpp.probat.assertEquals(jTotal["creditLimit"], 30000)
+    tlpp.probat.assertEquals(jTotal["creditDue"], "20261130")
+    tlpp.probat.assertEquals(jTotal["largestPurchase"], 8000)
+    tlpp.probat.assertEquals(jTotal["firstPurchase"], "20190310")
+    tlpp.probat.assertEquals(jTotal["lastPurchase"], "20261001")
+    tlpp.probat.assertEquals(jTotal["purchases"], 15)
+    tlpp.probat.assertEquals(jTotal["maxDelay"], 40)
+    tlpp.probat.assertEquals(jTotal["name"], "CLIENTE 01")
+Return .T.
+
+Method consolidateStores_PerClient_UsesFirstStore() as Logical Class test_tdash_fin_party
+    local jTotal := tdash.fin.u_consolidateStores({ ;
+        newStore("01", 10000, "20261231", 0, "", "", 0, 0, 0, 0), ;
+        newStore("02", 20000, "20261130", 0, "", "", 0, 0, 0, 0) }, "C") as json
+
+    tlpp.probat.assertEquals(jTotal["creditLimit"], 10000)
+    tlpp.probat.assertEquals(jTotal["creditDue"], "20261231")
+    tlpp.probat.assertEquals(jTotal["firstPurchase"], "")
+Return .T.
+
+Method consolidateStores_AverageDelay_WeightedByPayments() as Logical Class test_tdash_fin_party
+    local jTotal := tdash.fin.u_consolidateStores({ ;
+        newStore("01", 0, "", 0, "", "", 0, 0, 2, 4), ;
+        newStore("02", 0, "", 0, "", "", 0, 0, 6, 1) }, "L") as json
+
+    // (2 x 4 + 6 x 1) / 5 pagamentos = 2,8 dias
+    tlpp.probat.assertEquals(jTotal["avgDelay"], 2.8)
+    tlpp.probat.assertEquals(jTotal["payments"], 5)
+Return .T.
+
+/*/{Protheus.doc} newStore
+Loja de teste no formato de TDashFinPartyRepository:stores.
+@type static function
+/*/
+static function newStore(cStore as character, nLimit as numeric, cDue as character, nLargest as numeric, ;
+        cFirst as character, cLast as character, nPurchases as numeric, nMaxDelay as numeric, ;
+        nAvgDelay as numeric, nPayments as numeric) as json
+    local jStore := jsonObject():new() as json
+
+    jStore["store"]           := cStore
+    jStore["name"]            := "CLIENTE " + cStore
+    jStore["fantasy"]         := ""
+    jStore["document"]        := ""
+    jStore["city"]            := ""
+    jStore["state"]           := ""
+    jStore["blocked"]         := .F.
+    jStore["creditLimit"]     := nLimit
+    jStore["creditDue"]       := cDue
+    jStore["largestPurchase"] := nLargest
+    jStore["largestBalance"]  := 0
+    jStore["firstPurchase"]   := cFirst
+    jStore["lastPurchase"]    := cLast
+    jStore["purchases"]       := nPurchases
+    jStore["maxDelay"]        := nMaxDelay
+    jStore["avgDelay"]        := nAvgDelay
+    jStore["payments"]        := nPayments
+return jStore

@@ -1,0 +1,162 @@
+#include 'tlpp-core.th'
+#include 'totvs.ch'
+
+namespace tdash.com
+
+/*/{Protheus.doc} u_percentOf
+Percentual de uma parte sobre um total, com 2 casas. Zero quando o total é zero. Pode passar de 100 (pedido maior
+que a solicitação).
+@type user function
+@author TDash
+@since 25/10/2026
+@param nPart, numeric, parte
+@param nTotal, numeric, total
+@return numeric, percentual (0 sem total)
+/*/
+User Function percentOf(nPart as numeric, nTotal as numeric) as numeric
+    local nPct := 0 as numeric
+
+    if nTotal > 0
+        nPct := Round((nPart / nTotal) * 100, 2)
+    endIf
+return nPct
+
+/*/{Protheus.doc} u_traceItems
+Acompanhamento solicitação (SC1) -> pedido (SC7) -> nota de entrada (SD1), um item por item de solicitação.
+Cada linha de entrada é um item de SC com um item de pedido (ou sem pedido), já na ordem emissão, SC e item, para
+que as linhas do mesmo item de SC fiquem juntas. Regras:
+- pedido = soma de C7_QUANT dos itens de pedido ligados ao item de SC (pelo número, item e produto);
+- entregue = soma de C7_QUJE desses itens de pedido (na unidade do pedido);
+- valor do pedido = C7_QUANT x C7_PRECO x fator de moeda (u_brlFactor); valor entregue = D1_TOTAL das notas normais
+  amarradas ao item de pedido (já em reais);
+- valor solicitado = quantidade solicitada x preço médio do pedido (valor do pedido / quantidade pedida), porque
+  C1_VUNIT costuma vir zerado. SC sem pedido não tem valor solicitado.
+@type user function
+@author TDash
+@since 25/10/2026
+@param aRows, array, linhas (json) { numsc, itemsc, produto, descricao, um, qtdsc, emissao, numpc, itempc, qtdpc, qtdent, preco, moeda, taxa, valornf }
+@return array, itens (json) { numsc, itemsc, document, party, product, um, emissao, requested, ordered, delivered, requestedValue, orderedValue, deliveredValue, orders, pctOrdered, pctDelivered }
+/*/
+User Function traceItems(aRows as array) as array
+    local aItems := {} as array
+    local cKey   := "" as character
+    local cLast  := "" as character
+    local nLast  := 0 as numeric
+    local nX     := 0 as numeric
+
+    for nX := 1 to Len(aRows)
+        cKey := aRows[nX]["numsc"] + aRows[nX]["itemsc"]
+        if cKey != cLast
+            aAdd(aItems, newTraceItem(aRows[nX]))
+            cLast := cKey
+        endIf
+        nLast := Len(aItems)
+        if !Empty(aRows[nX]["numpc"])
+            addTraceOrder(aItems[nLast], aRows[nX])
+        endIf
+    next nX
+
+    for nX := 1 to Len(aItems)
+        finishTraceItem(aItems[nX])
+    next nX
+return aItems
+
+/*/{Protheus.doc} u_traceTotals
+Totais do acompanhamento: valores solicitado, pedido e entregue (R$), itens de SC sem pedido e itens com pedido
+menor que a solicitação.
+@type user function
+@author TDash
+@since 25/10/2026
+@param aItems, array, itens de u_traceItems
+@return json, { items, requestedValue, orderedValue, deliveredValue, unordered, partial }
+/*/
+User Function traceTotals(aItems as array) as json
+    local jTotals := jsonObject():new() as json
+    local nX      := 0 as numeric
+
+    jTotals["items"]          := Len(aItems)
+    jTotals["requestedValue"] := 0
+    jTotals["orderedValue"]   := 0
+    jTotals["deliveredValue"] := 0
+    jTotals["unordered"]      := 0
+    jTotals["partial"]        := 0
+
+    for nX := 1 to Len(aItems)
+        jTotals["requestedValue"] += aItems[nX]["requestedValue"]
+        jTotals["orderedValue"]   += aItems[nX]["orderedValue"]
+        jTotals["deliveredValue"] += aItems[nX]["deliveredValue"]
+        if aItems[nX]["ordered"] <= 0
+            jTotals["unordered"] += 1
+        elseIf aItems[nX]["ordered"] < aItems[nX]["requested"]
+            jTotals["partial"] += 1
+        endIf
+    next nX
+return jTotals
+
+/*/{Protheus.doc} newTraceItem
+Item de acompanhamento ainda sem pedido, a partir da primeira linha do item de SC.
+@type static function
+@author TDash
+@since 25/10/2026
+@param jRow, json, linha do item de SC
+@return json, item zerado
+/*/
+Static Function newTraceItem(jRow as json) as json
+    local jItem := jsonObject():new() as json
+
+    jItem["numsc"]          := jRow["numsc"]
+    jItem["itemsc"]         := jRow["itemsc"]
+    jItem["document"]       := "SC " + AllTrim(jRow["numsc"]) + "/" + AllTrim(jRow["itemsc"])
+    jItem["party"]          := "Sem pedido"
+    jItem["product"]        := AllTrim(jRow["produto"]) + " " + AllTrim(jRow["descricao"])
+    jItem["um"]             := AllTrim(jRow["um"])
+    jItem["emissao"]        := jRow["emissao"]
+    jItem["requested"]      := jRow["qtdsc"]
+    jItem["ordered"]        := 0
+    jItem["delivered"]      := 0
+    jItem["requestedValue"] := 0
+    jItem["orderedValue"]   := 0
+    jItem["deliveredValue"] := 0
+    jItem["orders"]         := 0
+    jItem["pctOrdered"]     := 0
+    jItem["pctDelivered"]   := 0
+return jItem
+
+/*/{Protheus.doc} addTraceOrder
+Soma um item de pedido no item de acompanhamento e atualiza o texto do pedido ("Pedido 000123/0001" ou "2 pedidos").
+@type static function
+@author TDash
+@since 25/10/2026
+@param jItem, json, item de acompanhamento (alterado)
+@param jRow, json, linha com o item de pedido
+/*/
+Static Function addTraceOrder(jItem as json, jRow as json)
+    jItem["orders"]         += 1
+    jItem["ordered"]        += jRow["qtdpc"]
+    jItem["delivered"]      += jRow["qtdent"]
+    jItem["orderedValue"]   += jRow["qtdpc"] * jRow["preco"] * tdash.com.u_brlFactor(jRow["moeda"], jRow["taxa"])
+    jItem["deliveredValue"] += jRow["valornf"]
+
+    if jItem["orders"] == 1
+        jItem["party"] := "Pedido " + AllTrim(jRow["numpc"]) + "/" + AllTrim(jRow["itempc"])
+    else
+        jItem["party"] := cValToChar(jItem["orders"]) + " pedidos"
+    endIf
+return
+
+/*/{Protheus.doc} finishTraceItem
+Fecha o item: valor solicitado pelo preço médio do pedido e os percentuais.
+@type static function
+@author TDash
+@since 25/10/2026
+@param jItem, json, item de acompanhamento (alterado)
+/*/
+Static Function finishTraceItem(jItem as json)
+    if jItem["ordered"] > 0
+        jItem["requestedValue"] := Round(jItem["requested"] * (jItem["orderedValue"] / jItem["ordered"]), 2)
+    endIf
+    jItem["orderedValue"]   := Round(jItem["orderedValue"], 2)
+    jItem["deliveredValue"] := Round(jItem["deliveredValue"], 2)
+    jItem["pctOrdered"]     := tdash.com.u_percentOf(jItem["ordered"], jItem["requested"])
+    jItem["pctDelivered"]   := tdash.com.u_percentOf(jItem["delivered"], jItem["ordered"])
+return

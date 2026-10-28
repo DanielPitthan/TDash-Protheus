@@ -1,0 +1,612 @@
+#include 'tlpp-core.th'
+#include 'totvs.ch'
+
+namespace tdash.com
+
+/*/{Protheus.doc} TDashComRepository
+Consultas dos indicadores de Compras (SD1, SF4, SC7, SC1, SA2, SB1).
+Acompanhamento = solicitação (SC1) -> pedido (SC7, por C7_NUMSC/C7_ITEMSC/produto) -> nota de entrada (SD1, por pedido,
+item, produto, fornecedor e loja).
+Compras = notas de entrada normais (D1_TIPO = 'N') com TES que gera duplicata (F4_DUPLIC = 'S'),
+pelo valor das mercadorias (D1_TOTAL). Pedido em aberto = saldo C7_QUANT - C7_QUJE, sem resíduo
+eliminado (C7_RESIDUO <> 'S') e não encerrado (C7_ENCER <> 'E'), em reais: pedido em moeda estrangeira
+(C7_MOEDA > 1) é convertido pela taxa do pedido (C7_TXMOEDA), como em tdash.com.u_brlFactor.
+Regras: docs/10-catalogo-de-indicadores.md (Compras).
+@type class
+@author TDash
+@since 20/10/2026
+@version 1.0
+/*/
+class TDashComRepository
+    public method new()
+
+    public method purchases(dFrom as date, dTo as date) as numeric
+    public method purchasesByDay(dFrom as date, dTo as date) as array
+    public method orders(cScope as character, dToday as date) as numeric
+    public method orderItems(cScope as character, dToday as date, nPage as numeric, nPageSize as numeric) as json
+    public method pendingRequests() as numeric
+    public method requestItems(nPage as numeric, nPageSize as numeric) as json
+    public method leadTimeRequest(dFrom as date, dTo as date) as numeric
+    public method leadTimeDelivery(dFrom as date, dTo as date) as numeric
+    public method topSuppliers(dFrom as date, dTo as date) as array
+    public method priceEvolution(dFrom as date, dTo as date, nTop as numeric) as array
+    public method traceRows(dFrom as date, dTo as date) as array
+
+    private method purchasesFrom(cJoin as character) as character
+    private method ordersWhere(cScope as character) as character
+    private method brlFactor() as character
+    private method bindOrders(oQuery as object, nStart as numeric, cScope as character, dToday as date)
+    private method requestsWhere() as character
+    private method averageDays(cQry as character, aBinds as array) as numeric
+    private method numberOf(cAlias as character, cField as character) as numeric
+endclass
+
+method new() class TDashComRepository
+return self
+
+/*/{Protheus.doc} purchases
+Valor comprado no período (D1_DTDIGIT).
+@type method
+@author TDash
+@since 20/10/2026
+@return numeric, valor
+/*/
+method purchases(dFrom as date, dTo as date) as numeric class TDashComRepository
+    local nTotal := 0 as numeric
+    local oQuery as object
+
+    oQuery := tdash.core.TDashQuery():new(" SELECT SUM(D1.D1_TOTAL) TOTAL " + ::purchasesFrom(""))
+    oQuery:setString(1, FWxFilial("SF4"))
+    oQuery:setString(2, FWxFilial("SD1"))
+    oQuery:setString(3, DToS(dFrom))
+    oQuery:setString(4, DToS(dTo))
+    if oQuery:open()
+        nTotal := ::numberOf(oQuery:getAlias(), "TOTAL")
+        oQuery:close()
+    endIf
+return nTotal
+
+/*/{Protheus.doc} purchasesByDay
+Valor comprado por dia de digitação.
+@type method
+@author TDash
+@since 20/10/2026
+@return array, { { data AAAAMMDD, valor }, ... }
+/*/
+method purchasesByDay(dFrom as date, dTo as date) as array class TDashComRepository
+    local aRows  := {} as array
+    local cAlias := "" as character
+    local oQuery as object
+
+    oQuery := tdash.core.TDashQuery():new(" SELECT D1.D1_DTDIGIT DIA, SUM(D1.D1_TOTAL) VALOR " + ::purchasesFrom("") + " GROUP BY D1.D1_DTDIGIT ORDER BY D1.D1_DTDIGIT ")
+    oQuery:setString(1, FWxFilial("SF4"))
+    oQuery:setString(2, FWxFilial("SD1"))
+    oQuery:setString(3, DToS(dFrom))
+    oQuery:setString(4, DToS(dTo))
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof())
+            aAdd(aRows, { (cAlias)->DIA, (cAlias)->VALOR })
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+return aRows
+
+/*/{Protheus.doc} traceRows
+Itens de solicitação emitidos no período (sem resíduo eliminado), cada um com seus itens de pedido (ligação por filial,
+número, item e produto) e o valor das notas de entrada normais amarradas a cada item de pedido (D1_TOTAL, em reais).
+Item de solicitação sem pedido volta uma linha com os campos do pedido vazios. A ordem (emissão, SC, item) mantém as
+linhas do mesmo item juntas para tdash.com.u_traceItems.
+@type method
+@author TDash
+@since 25/10/2026
+@param dFrom, date, início (C1_EMISSAO)
+@param dTo, date, fim
+@return array, linhas (json) { numsc, itemsc, produto, descricao, um, qtdsc, emissao, numpc, itempc, qtdpc, qtdent, preco, moeda, taxa, valornf }
+/*/
+method traceRows(dFrom as date, dTo as date) as array class TDashComRepository
+    local aRows  := {} as array
+    local jRow   as json
+    local cQry   := "" as character
+    local cAlias := "" as character
+    local oQuery as object
+
+    cQry := " SELECT C1.C1_NUM NUMSC, C1.C1_ITEM ITEMSC, C1.C1_PRODUTO PRODUTO, C1.C1_DESCRI DESCRICAO, C1.C1_UM UM, "
+    cQry += " C1.C1_QUANT QTDSC, C1.C1_EMISSAO EMISSAO, "
+    cQry += " COALESCE(C7.C7_NUM, ' ') NUMPC, COALESCE(C7.C7_ITEM, ' ') ITEMPC, "
+    cQry += " COALESCE(C7.C7_QUANT, 0) QTDPC, COALESCE(C7.C7_QUJE, 0) QTDENT, COALESCE(C7.C7_PRECO, 0) PRECO, "
+    cQry += " COALESCE(C7.C7_MOEDA, 1) MOEDA, COALESCE(C7.C7_TXMOEDA, 0) TAXA, COALESCE(N.VALOR, 0) VALORNF "
+    cQry += " FROM " + RetSqlName("SC1") + " C1 "
+    cQry += " LEFT JOIN " + RetSqlName("SC7") + " C7 ON C7.C7_FILIAL = ? AND C7.C7_NUMSC = C1.C1_NUM "
+    cQry += "   AND C7.C7_ITEMSC = C1.C1_ITEM AND C7.C7_PRODUTO = C1.C1_PRODUTO AND C7.D_E_L_E_T_ = ' ' "
+    cQry += " LEFT JOIN ( SELECT D1_PEDIDO, D1_ITEMPC, D1_COD, D1_FORNECE, D1_LOJA, SUM(D1_TOTAL) VALOR "
+    cQry += "   FROM " + RetSqlName("SD1") + " "
+    cQry += "   WHERE D1_FILIAL = ? AND D1_PEDIDO <> ' ' AND D1_TIPO = 'N' AND D_E_L_E_T_ = ' ' "
+    cQry += "   GROUP BY D1_PEDIDO, D1_ITEMPC, D1_COD, D1_FORNECE, D1_LOJA ) N ON N.D1_PEDIDO = C7.C7_NUM "
+    cQry += "   AND N.D1_ITEMPC = C7.C7_ITEM AND N.D1_COD = C7.C7_PRODUTO "
+    cQry += "   AND N.D1_FORNECE = C7.C7_FORNECE AND N.D1_LOJA = C7.C7_LOJA "
+    cQry += " WHERE C1.C1_FILIAL = ? "
+    cQry += " AND C1.C1_EMISSAO BETWEEN ? AND ? "
+    cQry += " AND C1.C1_RESIDUO <> 'S' "
+    cQry += " AND C1.D_E_L_E_T_ = ' ' "
+    cQry += " ORDER BY C1.C1_EMISSAO, C1.C1_NUM, C1.C1_ITEM, C7.C7_NUM, C7.C7_ITEM "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    oQuery:setString(1, FWxFilial("SC7"))
+    oQuery:setString(2, FWxFilial("SD1"))
+    oQuery:setString(3, FWxFilial("SC1"))
+    oQuery:setString(4, DToS(dFrom))
+    oQuery:setString(5, DToS(dTo))
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof())
+            jRow := jsonObject():new()
+            jRow["numsc"]     := (cAlias)->NUMSC
+            jRow["itemsc"]    := (cAlias)->ITEMSC
+            jRow["produto"]   := (cAlias)->PRODUTO
+            jRow["descricao"] := (cAlias)->DESCRICAO
+            jRow["um"]        := (cAlias)->UM
+            jRow["qtdsc"]     := (cAlias)->QTDSC
+            jRow["emissao"]   := (cAlias)->EMISSAO
+            jRow["numpc"]     := (cAlias)->NUMPC
+            jRow["itempc"]    := (cAlias)->ITEMPC
+            jRow["qtdpc"]     := (cAlias)->QTDPC
+            jRow["qtdent"]    := (cAlias)->QTDENT
+            jRow["preco"]     := (cAlias)->PRECO
+            jRow["moeda"]     := (cAlias)->MOEDA
+            jRow["taxa"]      := (cAlias)->TAXA
+            jRow["valornf"]   := (cAlias)->VALORNF
+            aAdd(aRows, jRow)
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+return aRows
+
+/*/{Protheus.doc} brlFactor
+Trecho de SQL com o fator que leva o preço do pedido (C7_PRECO, na moeda do pedido) para reais: a taxa do pedido
+quando a moeda não é a 1 e a taxa está preenchida; senão 1. Mesma regra de tdash.com.u_brlFactor.
+@type method
+@author TDash
+@since 25/10/2026
+@return character, expressão SQL (alias C7)
+/*/
+method brlFactor() as character class TDashComRepository
+return " (CASE WHEN C7.C7_MOEDA > 1 AND C7.C7_TXMOEDA > 0 THEN C7.C7_TXMOEDA ELSE 1 END) "
+
+/*/{Protheus.doc} orders
+Saldo em aberto dos pedidos de compra (quantidade pendente x preço), em reais.
+cScope: "open" (todos), "late" (entrega antes de hoje), "approval" (bloqueados aguardando aprovação).
+@type method
+@author TDash
+@since 20/10/2026
+@return numeric, valor
+/*/
+method orders(cScope as character, dToday as date) as numeric class TDashComRepository
+    local nTotal := 0 as numeric
+    local oQuery as object
+
+    oQuery := tdash.core.TDashQuery():new(;
+        " SELECT SUM((C7.C7_QUANT - C7.C7_QUJE) * C7.C7_PRECO * " + ::brlFactor() + ") TOTAL " + ;
+        " FROM " + RetSqlName("SC7") + " C7 " + ::ordersWhere(cScope))
+    ::bindOrders(oQuery, 1, cScope, dToday)
+    if oQuery:open()
+        nTotal := ::numberOf(oQuery:getAlias(), "TOTAL")
+        oQuery:close()
+    endIf
+return nTotal
+
+/*/{Protheus.doc} orderItems
+Itens de pedidos de compra em aberto (mesmos escopos de orders), pela data de entrega.
+@type method
+@author TDash
+@since 20/10/2026
+@return json, { items, hasNext, total }
+/*/
+method orderItems(cScope as character, dToday as date, nPage as numeric, nPageSize as numeric) as json class TDashComRepository
+    local jResult := jsonObject():new() as json
+    local jItem   as json
+    local aItems  := {} as array
+    local cQry    := "" as character
+    local cAlias  := "" as character
+    local nTotal  := 0 as numeric
+    local oQuery  as object
+
+    oQuery := tdash.core.TDashQuery():new(" SELECT COUNT(*) TOTAL FROM " + RetSqlName("SC7") + " C7 " + ::ordersWhere(cScope))
+    ::bindOrders(oQuery, 1, cScope, dToday)
+    if oQuery:open()
+        nTotal := ::numberOf(oQuery:getAlias(), "TOTAL")
+        oQuery:close()
+    endIf
+
+    cQry := " SELECT C7.C7_NUM NUM, C7.C7_ITEM ITEM, C7.C7_PRODUTO PRODUTO, C7.C7_DESCRI DESCRICAO, "
+    cQry += " C7.C7_DATPRF ENTREGA, (C7.C7_QUANT - C7.C7_QUJE) SALDO, "
+    cQry += " (C7.C7_QUANT - C7.C7_QUJE) * C7.C7_PRECO * " + ::brlFactor() + " VALOR, A2.A2_NOME FORNECEDOR "
+    cQry += " FROM " + RetSqlName("SC7") + " C7 "
+    cQry += " LEFT JOIN " + RetSqlName("SA2") + " A2 ON A2.A2_FILIAL = ? AND A2.A2_COD = C7.C7_FORNECE AND A2.A2_LOJA = C7.C7_LOJA AND A2.D_E_L_E_T_ = ' ' "
+    cQry += ::ordersWhere(cScope)
+    cQry += " ORDER BY C7.C7_DATPRF, C7.C7_NUM, C7.C7_ITEM "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    oQuery:setString(1, FWxFilial("SA2"))
+    ::bindOrders(oQuery, 2, cScope, dToday)
+
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        (cAlias)->(DbSkip((nPage - 1) * nPageSize))
+        while !(cAlias)->(Eof()) .and. Len(aItems) < nPageSize
+            jItem := jsonObject():new()
+            jItem["document"] := "Pedido " + AllTrim((cAlias)->NUM) + "/" + AllTrim((cAlias)->ITEM)
+            jItem["party"]    := AllTrim((cAlias)->FORNECEDOR)
+            jItem["product"]  := AllTrim((cAlias)->PRODUTO) + " " + AllTrim((cAlias)->DESCRICAO)
+            if Empty((cAlias)->ENTREGA)
+                jItem["dueDate"] := Nil
+            else
+                jItem["dueDate"] := Transform((cAlias)->ENTREGA, "@R 9999-99-99")
+            endIf
+            jItem["quantity"] := Round((cAlias)->SALDO, 2)
+            jItem["balance"]  := Round((cAlias)->VALOR, 2)
+            aAdd(aItems, jItem)
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+
+    jResult["items"]   := aItems
+    jResult["total"]   := nTotal
+    jResult["hasNext"] := (nPage * nPageSize) < nTotal
+return jResult
+
+/*/{Protheus.doc} pendingRequests
+Quantidade de itens de solicitação de compra pendentes (sem pedido, sem resíduo eliminado).
+@type method
+@author TDash
+@since 20/10/2026
+@return numeric, quantidade de itens
+/*/
+method pendingRequests() as numeric class TDashComRepository
+    local nTotal := 0 as numeric
+    local oQuery as object
+
+    oQuery := tdash.core.TDashQuery():new(" SELECT COUNT(*) TOTAL FROM " + RetSqlName("SC1") + " C1 " + ::requestsWhere())
+    oQuery:setString(1, FWxFilial("SC1"))
+    if oQuery:open()
+        nTotal := ::numberOf(oQuery:getAlias(), "TOTAL")
+        oQuery:close()
+    endIf
+return nTotal
+
+/*/{Protheus.doc} requestItems
+Itens de solicitação de compra pendentes, da mais antiga para a mais recente.
+@type method
+@author TDash
+@since 20/10/2026
+@return json, { items, hasNext, total }
+/*/
+method requestItems(nPage as numeric, nPageSize as numeric) as json class TDashComRepository
+    local jResult := jsonObject():new() as json
+    local jItem   as json
+    local aItems  := {} as array
+    local cQry    := "" as character
+    local cAlias  := "" as character
+    local nTotal  := 0 as numeric
+    local oQuery  as object
+
+    nTotal := ::pendingRequests()
+
+    cQry := " SELECT C1.C1_NUM NUM, C1.C1_ITEM ITEM, C1.C1_PRODUTO PRODUTO, C1.C1_DESCRI DESCRICAO, "
+    cQry += " C1.C1_SOLICIT SOLICITANTE, C1.C1_EMISSAO EMISSAO, (C1.C1_QUANT - C1.C1_QUJE) SALDO "
+    cQry += " FROM " + RetSqlName("SC1") + " C1 "
+    cQry += ::requestsWhere()
+    cQry += " ORDER BY C1.C1_EMISSAO, C1.C1_NUM, C1.C1_ITEM "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    oQuery:setString(1, FWxFilial("SC1"))
+
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        (cAlias)->(DbSkip((nPage - 1) * nPageSize))
+        while !(cAlias)->(Eof()) .and. Len(aItems) < nPageSize
+            jItem := jsonObject():new()
+            jItem["document"] := "Solicitação " + AllTrim((cAlias)->NUM) + "/" + AllTrim((cAlias)->ITEM)
+            jItem["party"]    := AllTrim((cAlias)->SOLICITANTE)
+            jItem["product"]  := AllTrim((cAlias)->PRODUTO) + " " + AllTrim((cAlias)->DESCRICAO)
+            if Empty((cAlias)->EMISSAO)
+                jItem["dueDate"] := Nil
+            else
+                jItem["dueDate"] := Transform((cAlias)->EMISSAO, "@R 9999-99-99")
+            endIf
+            jItem["quantity"] := Round((cAlias)->SALDO, 2)
+            aAdd(aItems, jItem)
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+
+    jResult["items"]   := aItems
+    jResult["total"]   := nTotal
+    jResult["hasNext"] := (nPage * nPageSize) < nTotal
+return jResult
+
+/*/{Protheus.doc} leadTimeRequest
+Prazo médio (dias) entre a solicitação (C1_EMISSAO) e o pedido (C7_EMISSAO), para pedidos
+emitidos no período e originados de solicitação.
+@type method
+@author TDash
+@since 20/10/2026
+@return numeric, dias
+/*/
+method leadTimeRequest(dFrom as date, dTo as date) as numeric class TDashComRepository
+    local cQry := "" as character
+
+    cQry := " SELECT C1.C1_EMISSAO INICIO, C7.C7_EMISSAO FIM, COUNT(*) QTD "
+    cQry += " FROM " + RetSqlName("SC7") + " C7 "
+    cQry += " INNER JOIN " + RetSqlName("SC1") + " C1 ON C1.C1_FILIAL = ? AND C1.C1_NUM = C7.C7_NUMSC "
+    cQry += "   AND C1.C1_ITEM = C7.C7_ITEMSC AND C1.D_E_L_E_T_ = ' ' "
+    cQry += " WHERE C7.C7_FILIAL = ? "
+    cQry += " AND C7.C7_NUMSC <> ' ' "
+    cQry += " AND C7.C7_EMISSAO BETWEEN ? AND ? "
+    cQry += " AND C7.D_E_L_E_T_ = ' ' "
+    cQry += " GROUP BY C1.C1_EMISSAO, C7.C7_EMISSAO "
+return ::averageDays(cQry, { FWxFilial("SC1"), FWxFilial("SC7"), DToS(dFrom), DToS(dTo) })
+
+/*/{Protheus.doc} leadTimeDelivery
+Prazo médio (dias) entre o pedido (C7_EMISSAO) e a entrada da nota (D1_DTDIGIT), para notas
+digitadas no período e amarradas a pedido.
+@type method
+@author TDash
+@since 20/10/2026
+@return numeric, dias
+/*/
+method leadTimeDelivery(dFrom as date, dTo as date) as numeric class TDashComRepository
+    local cQry := "" as character
+
+    cQry := " SELECT C7.C7_EMISSAO INICIO, D1.D1_DTDIGIT FIM, COUNT(*) QTD "
+    cQry += " FROM " + RetSqlName("SD1") + " D1 "
+    cQry += " INNER JOIN " + RetSqlName("SC7") + " C7 ON C7.C7_FILIAL = ? AND C7.C7_NUM = D1.D1_PEDIDO "
+    cQry += "   AND C7.C7_ITEM = D1.D1_ITEMPC AND C7.D_E_L_E_T_ = ' ' "
+    cQry += " WHERE D1.D1_FILIAL = ? "
+    cQry += " AND D1.D1_PEDIDO <> ' ' "
+    cQry += " AND D1.D1_DTDIGIT BETWEEN ? AND ? "
+    cQry += " AND D1.D_E_L_E_T_ = ' ' "
+    cQry += " GROUP BY C7.C7_EMISSAO, D1.D1_DTDIGIT "
+return ::averageDays(cQry, { FWxFilial("SC7"), FWxFilial("SD1"), DToS(dFrom), DToS(dTo) })
+
+/*/{Protheus.doc} topSuppliers
+Valor comprado por fornecedor no período, do maior para o menor.
+@type method
+@author TDash
+@since 20/10/2026
+@return array, { { chave, nome, valor }, ... }
+/*/
+method topSuppliers(dFrom as date, dTo as date) as array class TDashComRepository
+    local aRows  := {} as array
+    local cQry   := "" as character
+    local cAlias := "" as character
+    local cName  := "" as character
+    local oQuery as object
+
+    cQry := " SELECT D1.D1_FORNECE CODIGO, D1.D1_LOJA LOJA, MAX(A2.A2_NOME) NOME, SUM(D1.D1_TOTAL) VALOR "
+    cQry += ::purchasesFrom(;
+        " LEFT JOIN " + RetSqlName("SA2") + " A2 ON A2.A2_FILIAL = ? AND A2.A2_COD = D1.D1_FORNECE AND A2.A2_LOJA = D1.D1_LOJA AND A2.D_E_L_E_T_ = ' ' ")
+    cQry += " GROUP BY D1.D1_FORNECE, D1.D1_LOJA ORDER BY SUM(D1.D1_TOTAL) DESC "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    oQuery:setString(1, FWxFilial("SA2"))
+    oQuery:setString(2, FWxFilial("SF4"))
+    oQuery:setString(3, FWxFilial("SD1"))
+    oQuery:setString(4, DToS(dFrom))
+    oQuery:setString(5, DToS(dTo))
+
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof())
+            cName := AllTrim((cAlias)->NOME)
+            if Empty(cName)
+                cName := AllTrim((cAlias)->CODIGO) + "-" + AllTrim((cAlias)->LOJA)
+            endIf
+            aAdd(aRows, { AllTrim((cAlias)->CODIGO) + "-" + AllTrim((cAlias)->LOJA), cName, (cAlias)->VALOR })
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+return aRows
+
+/*/{Protheus.doc} priceEvolution
+Preço médio ponderado (valor / quantidade) dos nTop produtos mais comprados no período,
+por dia de digitação. A API agrupa por mês.
+@type method
+@author TDash
+@since 20/10/2026
+@return array, { { produto, descrição, data AAAAMMDD, valor, quantidade }, ... }
+/*/
+method priceEvolution(dFrom as date, dTo as date, nTop as numeric) as array class TDashComRepository
+    local aRows     := {} as array
+    local aProducts := {} as array
+    local aCodes    := {} as array
+    local cQry      := "" as character
+    local cAlias    := "" as character
+    local nPos      := 0 as numeric
+    local oQuery    as object
+
+    // 1) Produtos de maior valor comprado no período
+    cQry := " SELECT D1.D1_COD PRODUTO, MAX(B1.B1_DESC) DESCRICAO, SUM(D1.D1_TOTAL) VALOR "
+    cQry += ::purchasesFrom(;
+        " LEFT JOIN " + RetSqlName("SB1") + " B1 ON B1.B1_FILIAL = ? AND B1.B1_COD = D1.D1_COD AND B1.D_E_L_E_T_ = ' ' ")
+    cQry += " GROUP BY D1.D1_COD ORDER BY SUM(D1.D1_TOTAL) DESC "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    oQuery:setString(1, FWxFilial("SB1"))
+    oQuery:setString(2, FWxFilial("SF4"))
+    oQuery:setString(3, FWxFilial("SD1"))
+    oQuery:setString(4, DToS(dFrom))
+    oQuery:setString(5, DToS(dTo))
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof()) .and. Len(aProducts) < nTop
+            aAdd(aProducts, { (cAlias)->PRODUTO, AllTrim((cAlias)->DESCRICAO) })
+            aAdd(aCodes, (cAlias)->PRODUTO)
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+
+    if Len(aCodes) == 0
+        return aRows
+    endIf
+
+    // 2) Valor e quantidade por dia desses produtos
+    cQry := " SELECT D1.D1_COD PRODUTO, D1.D1_DTDIGIT DIA, SUM(D1.D1_TOTAL) VALOR, SUM(D1.D1_QUANT) QTD "
+    cQry += ::purchasesFrom("")
+    cQry += " AND D1.D1_COD IN (?) "
+    cQry += " GROUP BY D1.D1_COD, D1.D1_DTDIGIT ORDER BY D1.D1_DTDIGIT "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    oQuery:setString(1, FWxFilial("SF4"))
+    oQuery:setString(2, FWxFilial("SD1"))
+    oQuery:setString(3, DToS(dFrom))
+    oQuery:setString(4, DToS(dTo))
+    oQuery:setIn(5, aCodes)
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof())
+            nPos := AScan(aProducts, {|x| x[1] == (cAlias)->PRODUTO})
+            aAdd(aRows, { AllTrim((cAlias)->PRODUTO), aProducts[nPos][2], (cAlias)->DIA, (cAlias)->VALOR, (cAlias)->QTD })
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+return aRows
+
+/*/{Protheus.doc} purchasesFrom
+FROM/WHERE das compras, com um JOIN opcional de cadastro antes do SF4.
+Binds: [filial do cadastro do JOIN], SF4 filial, SD1 filial, data inicial, data final.
+@type method
+@author TDash
+@since 20/10/2026
+@param cJoin, character, JOIN adicional (ou vazio)
+@return character, cláusulas FROM e WHERE
+/*/
+method purchasesFrom(cJoin as character) as character class TDashComRepository
+    local cFrom := "" as character
+
+    cFrom := " FROM " + RetSqlName("SD1") + " D1 "
+    cFrom += cJoin
+    cFrom += " INNER JOIN " + RetSqlName("SF4") + " F4 ON F4.F4_FILIAL = ? AND F4.F4_CODIGO = D1.D1_TES "
+    cFrom += "   AND F4.F4_DUPLIC = 'S' AND F4.D_E_L_E_T_ = ' ' "
+    cFrom += " WHERE D1.D1_FILIAL = ? "
+    cFrom += " AND D1.D1_TIPO = 'N' "
+    cFrom += " AND D1.D1_DTDIGIT BETWEEN ? AND ? "
+    cFrom += " AND D1.D_E_L_E_T_ = ' ' "
+return cFrom
+
+/*/{Protheus.doc} ordersWhere
+WHERE dos pedidos em aberto por escopo. Binds: filial do SC7 e, para "late", a data de hoje.
+@type method
+@author TDash
+@since 20/10/2026
+@return character, cláusula WHERE
+/*/
+method ordersWhere(cScope as character) as character class TDashComRepository
+    local cWhere := "" as character
+
+    cWhere := " WHERE C7.C7_FILIAL = ? "
+    cWhere += " AND C7.C7_QUANT > C7.C7_QUJE "
+    cWhere += " AND C7.C7_RESIDUO <> 'S' "
+    cWhere += " AND C7.C7_ENCER <> 'E' "
+    cWhere += " AND C7.D_E_L_E_T_ = ' ' "
+    if cScope == "late"
+        cWhere += " AND C7.C7_DATPRF < ? AND C7.C7_DATPRF <> ' ' "
+    elseIf cScope == "approval"
+        cWhere += " AND C7.C7_CONAPRO = 'B' "
+    endIf
+return cWhere
+
+/*/{Protheus.doc} bindOrders
+Binds de ordersWhere a partir da posição nStart.
+@type method
+@author TDash
+@since 20/10/2026
+/*/
+method bindOrders(oQuery as object, nStart as numeric, cScope as character, dToday as date) class TDashComRepository
+    oQuery:setString(nStart, FWxFilial("SC7"))
+    if cScope == "late"
+        oQuery:setString(nStart + 1, DToS(dToday))
+    endIf
+return
+
+/*/{Protheus.doc} requestsWhere
+WHERE das solicitações pendentes. Bind: filial do SC1.
+@type method
+@author TDash
+@since 20/10/2026
+@return character, cláusula WHERE
+/*/
+method requestsWhere() as character class TDashComRepository
+    local cWhere := "" as character
+
+    cWhere := " WHERE C1.C1_FILIAL = ? "
+    cWhere += " AND C1.C1_QUANT > C1.C1_QUJE "
+    cWhere += " AND C1.C1_RESIDUO <> 'S' "
+    cWhere += " AND C1.C1_PEDIDO = ' ' "
+    cWhere += " AND C1.D_E_L_E_T_ = ' ' "
+return cWhere
+
+/*/{Protheus.doc} averageDays
+Média de dias (FIM - INICIO) ponderada pela quantidade de itens, de uma consulta agrupada
+com as colunas INICIO, FIM e QTD.
+@type method
+@author TDash
+@since 20/10/2026
+@param cQry, character, SQL
+@param aBinds, array, valores dos binds (texto), na ordem
+@return numeric, dias (0 quando não há linhas)
+/*/
+method averageDays(cQry as character, aBinds as array) as numeric class TDashComRepository
+    local cAlias  := "" as character
+    local nWeight := 0 as numeric
+    local nCount  := 0 as numeric
+    local nX      := 0 as numeric
+    local oQuery  as object
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    for nX := 1 to Len(aBinds)
+        oQuery:setString(nX, aBinds[nX])
+    next nX
+
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof())
+            if !Empty((cAlias)->INICIO) .and. !Empty((cAlias)->FIM)
+                nWeight += tdash.core.u_daysBetween(SToD((cAlias)->INICIO), SToD((cAlias)->FIM)) * (cAlias)->QTD
+                nCount  += (cAlias)->QTD
+            endIf
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+
+    if nCount > 0
+        nWeight := Round(nWeight / nCount, 1)
+    endIf
+return nWeight
+
+/*/{Protheus.doc} numberOf
+Valor numérico de um campo da linha atual; 0 quando nulo (ex.: SUM sem linhas).
+@type method
+@author TDash
+@since 20/10/2026
+@return numeric, valor ou 0
+/*/
+method numberOf(cAlias as character, cField as character) as numeric class TDashComRepository
+    local nValue := 0 as numeric
+    local xValue
+
+    if !(cAlias)->(Eof())
+        xValue := (cAlias)->(FieldGet(FieldPos(cField)))
+        if valType(xValue) == "N"
+            nValue := xValue
+        endIf
+    endIf
+return nValue

@@ -1,0 +1,528 @@
+#include 'tlpp-core.th'
+#include 'tlpp-rest.th'
+#include 'totvs.ch'
+
+// Validade das respostas (segundos): operacional, tático, estratégico
+#define TTL_OP  300
+#define TTL_TAT 1800
+#define TTL_EST 43200
+
+#define DEFAULT_TOP          10
+#define DEFAULT_PAGE_SIZE    20
+#define PRICE_PRODUCTS       5
+
+/*/{Protheus.doc} TDashComApi
+APIs de negócio de Compras para o TDash.
+Rotas: catalog, kpis, series/:id, breakdown/:id, list/:id (prefixo /tdash/v1/com).
+Indicadores e regras: docs/10-catalogo-de-indicadores.md (seção Compras).
+Formato das respostas (o que o app espera): docs/02-contrato-de-resposta.md.
+@type class
+@author TDash
+@since 20/10/2026
+@version 1.0
+/*/
+namespace tdash.com
+
+class TDashComApi
+    public method new()
+
+    @Get("/tdash/v1/com/catalog")
+    public method getCatalog()
+
+    @Get("/tdash/v1/com/kpis")
+    public method getKpis()
+
+    @Get("/tdash/v1/com/series/:id")
+    public method getSeries()
+
+    @Get("/tdash/v1/com/breakdown/:id")
+    public method getBreakdown()
+
+    @Get("/tdash/v1/com/list/:id")
+    public method getList()
+
+    private data cTraceKey as character
+    private data aTrace    as array
+
+    private method kpiValue(cId as character, dFrom as date, dTo as date, dToday as date) as numeric
+    private method trace(dFrom as date, dTo as date) as array
+endclass
+
+method new() class TDashComApi
+    ::cTraceKey := ""
+    ::aTrace    := {}
+return self
+
+/*/{Protheus.doc} trace
+Acompanhamento solicitação -> pedido -> entrega do período, guardado para não repetir a consulta na mesma requisição
+(os cartões, a série e a lista usam o mesmo resultado).
+@type method
+@author TDash
+@since 25/10/2026
+@param dFrom, date, início (emissão da solicitação)
+@param dTo, date, fim
+@return array, itens (json) de tdash.com.u_traceItems
+/*/
+method trace(dFrom as date, dTo as date) as array class TDashComApi
+    local cKey := DToS(dFrom) + DToS(dTo) as character
+    local oRepo as object
+
+    if !(::cTraceKey == cKey)
+        oRepo       := TDashComRepository():new()
+        ::aTrace    := tdash.com.u_traceItems(oRepo:traceRows(dFrom, dTo))
+        ::cTraceKey := cKey
+    endIf
+return ::aTrace
+
+/*/{Protheus.doc} getCatalog
+GET /tdash/v1/com/catalog
+@type method
+@author TDash
+@since 20/10/2026
+@return logical, sempre .T.
+/*/
+method getCatalog() class TDashComApi
+    local oHelper := tdash.core.TDashResponseHelper():new() as object
+    local jBody   := jsonObject():new() as json
+
+    jBody["items"] := tdash.core.u_catalogItems(comCatalog())
+    oHelper:setCacheHeaders(TTL_EST)
+    oRest:setResponse(oHelper:getResponse(jBody))
+return .T.
+
+/*/{Protheus.doc} getKpis
+GET /tdash/v1/com/kpis?ids=a,b&dateFrom=AAAAMMDD&dateTo=AAAAMMDD&compare=none|prev|yoy
+Valor comprado, prazos médios e o acompanhamento solicitado x pedido x entregue (pela emissão da
+solicitação) são de período e aceitam comparação; pedidos e solicitações em aberto são posição de hoje.
+@type method
+@author TDash
+@since 20/10/2026
+@return logical, sempre .T.
+/*/
+method getKpis() class TDashComApi
+    local oRequest := tdash.core.TDashRequest():new() as object
+    local oHelper  := tdash.core.TDashResponseHelper():new() as object
+    local oPeriod  := tdash.core.TDashPeriod():new() as object
+    local jBody    := jsonObject():new() as json
+    local aIds     := {} as array
+    local aItems   := {} as array
+    local aDef     := {} as array
+    local aPeriod  := { "com.purchases", "com.lead_time_request", "com.lead_time_delivery", "com.trace_requested", "com.trace_ordered", "com.trace_delivered", "com.trace_unordered" } as array
+    local dToday   := Date() as date
+    local lCompare := .F. as logical
+    local nTtl     := TTL_EST as numeric
+    local nValue   := 0 as numeric
+    local nPrev    := 0 as numeric
+    local nX       := 0 as numeric
+
+    aIds := StrTokArr2(oRequest:query("ids"), ",", .F.)
+    if Len(aIds) == 0 .or. Len(aIds) > 20
+        oHelper:badRequest("Informe de 1 a 20 indicadores em ids.")
+        return .T.
+    endIf
+
+    if !oPeriod:fromQuery(oRequest:query("dateFrom"), oRequest:query("dateTo"), oRequest:query("compare"), dToday)
+        oHelper:badRequest(oPeriod:cError)
+        return .T.
+    endIf
+
+    for nX := 1 to Len(aIds)
+        if Len(tdash.core.u_findIndicator(comCatalog(), aIds[nX], "kpi")) == 0
+            oHelper:notFound(AllTrim(aIds[nX]), "com")
+            return .T.
+        endIf
+    next nX
+
+    TRY
+        for nX := 1 to Len(aIds)
+            aDef     := tdash.core.u_findIndicator(comCatalog(), aIds[nX], "kpi")
+            nValue   := ::kpiValue(aDef[1], oPeriod:dFrom, oPeriod:dTo, dToday)
+            lCompare := oPeriod:hasCompare() .and. AScan(aPeriod, {|x| x == aDef[1]}) > 0
+            nPrev    := 0
+            if lCompare
+                nPrev := ::kpiValue(aDef[1], oPeriod:compareFrom(), oPeriod:compareTo(), dToday)
+            endIf
+
+            aAdd(aItems, tdash.core.u_kpiItem(aDef, nValue, lCompare, oPeriod:cCompare, nPrev, oHelper:timestamp()))
+            nTtl := Min(nTtl, aDef[6])
+        next nX
+
+        jBody["items"] := aItems
+        oHelper:setCacheHeaders(nTtl)
+        oRest:setResponse(oHelper:getResponse(jBody))
+    CATCH oError
+        oHelper:serverError("TDashComApi:kpis", oError:description)
+    ENDTRY
+return .T.
+
+/*/{Protheus.doc} getSeries
+GET /tdash/v1/com/series/:id?dateFrom&dateTo&grain=day|week|month
+com.purchases: valor comprado (série "purchases").
+com.price_evolution: preço médio mensal dos 5 produtos de maior valor comprado (uma série por produto).
+com.trace: solicitado, pedido e entregue (R$) por mês de emissão da solicitação (séries requested, ordered, delivered).
+@type method
+@author TDash
+@since 20/10/2026
+@return logical, sempre .T.
+/*/
+method getSeries() class TDashComApi
+    local oRequest := tdash.core.TDashRequest():new() as object
+    local oHelper  := tdash.core.TDashResponseHelper():new() as object
+    local oPeriod  := tdash.core.TDashPeriod():new() as object
+    local oRepo    := TDashComRepository():new() as object
+    local jBody    := jsonObject():new() as json
+    local aDef     := {} as array
+    local aGroups  := {} as array
+    local aRows    := {} as array
+    local aPoints  := {} as array
+    local aSeries  := {} as array
+    local aValue   := {} as array
+    local aQty     := {} as array
+    local aKeys    := {} as array
+    local aTrace   := {} as array
+    local aRequested := {} as array
+    local aOrdered   := {} as array
+    local aDelivered := {} as array
+    local cId      := oRequest:path("id") as character
+    local cGrain   := Lower(oRequest:query("grain")) as character
+    local cLabel   := "" as character
+    local nQty     := 0 as numeric
+    local nX       := 0 as numeric
+    local nY       := 0 as numeric
+
+    aDef := tdash.core.u_findIndicator(comCatalog(), cId, "series")
+    if Len(aDef) == 0
+        oHelper:notFound(cId, "com")
+        return .T.
+    endIf
+
+    if Empty(cGrain)
+        cGrain := "day"
+    endIf
+    if AScan({ "day", "week", "month" }, {|x| x == cGrain}) == 0
+        oHelper:badRequest("grain inválido. Use day, week ou month.")
+        return .T.
+    endIf
+
+    if !oPeriod:fromQuery(oRequest:query("dateFrom"), oRequest:query("dateTo"), "none", Date())
+        oHelper:badRequest(oPeriod:cError)
+        return .T.
+    endIf
+
+    TRY
+        if cId == "com.purchases"
+            aGroups := tdash.core.u_groupRows(oRepo:purchasesByDay(oPeriod:dFrom, oPeriod:dTo), cGrain)
+            for nX := 1 to Len(aGroups)
+                aAdd(aPoints, tdash.core.u_jsonPoint(aGroups[nX][1], aGroups[nX][2], "purchases"))
+            next nX
+            aSeries := { "purchases" }
+        elseIf cId == "com.trace"
+            // Sempre mensal: valores das solicitações emitidas no mês, com o que virou pedido e o que chegou
+            cGrain := "month"
+            aTrace := ::trace(oPeriod:dFrom, oPeriod:dTo)
+            for nX := 1 to Len(aTrace)
+                aAdd(aRequested, { aTrace[nX]["emissao"], aTrace[nX]["requestedValue"] })
+                aAdd(aOrdered,   { aTrace[nX]["emissao"], aTrace[nX]["orderedValue"] })
+                aAdd(aDelivered, { aTrace[nX]["emissao"], aTrace[nX]["deliveredValue"] })
+            next nX
+            aRequested := tdash.core.u_groupRows(aRequested, "month")
+            aOrdered   := tdash.core.u_groupRows(aOrdered, "month")
+            aDelivered := tdash.core.u_groupRows(aDelivered, "month")
+            // As três séries saem dos mesmos itens de solicitação, então têm as mesmas chaves (meses)
+            aKeys      := tdash.core.u_mergeKeys(aRequested, aOrdered)
+            for nX := 1 to Len(aKeys)
+                aAdd(aPoints, tdash.core.u_jsonPoint(aKeys[nX], tdash.core.u_valueOf(aRequested, aKeys[nX]), "requested"))
+                aAdd(aPoints, tdash.core.u_jsonPoint(aKeys[nX], tdash.core.u_valueOf(aOrdered, aKeys[nX]), "ordered"))
+                aAdd(aPoints, tdash.core.u_jsonPoint(aKeys[nX], tdash.core.u_valueOf(aDelivered, aKeys[nX]), "delivered"))
+            next nX
+            aSeries := { "requested", "ordered", "delivered" }
+        else
+            // Preço médio = soma do valor / soma da quantidade no mês, por produto
+            cGrain := "month"
+            aRows  := oRepo:priceEvolution(oPeriod:dFrom, oPeriod:dTo, PRICE_PRODUCTS)
+            for nX := 1 to Len(aRows)
+                cLabel := aRows[nX][1] + " " + aRows[nX][2]
+                if AScan(aSeries, {|x| x == cLabel}) == 0
+                    aAdd(aSeries, cLabel)
+                endIf
+            next nX
+
+            for nX := 1 to Len(aSeries)
+                aValue := {}
+                aQty   := {}
+                for nY := 1 to Len(aRows)
+                    if aRows[nY][1] + " " + aRows[nY][2] == aSeries[nX]
+                        aAdd(aValue, { aRows[nY][3], aRows[nY][4] })
+                        aAdd(aQty,   { aRows[nY][3], aRows[nY][5] })
+                    endIf
+                next nY
+                aValue := tdash.core.u_groupRows(aValue, "month")
+                aQty   := tdash.core.u_groupRows(aQty, "month")
+                aKeys  := tdash.core.u_mergeKeys(aValue, aQty)
+                for nY := 1 to Len(aKeys)
+                    nQty := tdash.core.u_valueOf(aQty, aKeys[nY])
+                    if nQty > 0
+                        aAdd(aPoints, tdash.core.u_jsonPoint(aKeys[nY], tdash.core.u_valueOf(aValue, aKeys[nY]) / nQty, aSeries[nX]))
+                    endIf
+                next nY
+            next nX
+        endIf
+
+        jBody["id"]          := aDef[1]
+        jBody["unit"]        := aDef[4]
+        jBody["grain"]       := cGrain
+        jBody["series"]      := aSeries
+        jBody["points"]      := aPoints
+        jBody["generatedAt"] := oHelper:timestamp()
+        jBody["ttl"]         := aDef[6]
+
+        oHelper:setCacheHeaders(aDef[6])
+        oRest:setResponse(oHelper:getResponse(jBody))
+    CATCH oError
+        oHelper:serverError("TDashComApi:series", oError:description)
+    ENDTRY
+return .T.
+
+/*/{Protheus.doc} getBreakdown
+GET /tdash/v1/com/breakdown/com.top_suppliers?top=10&dateFrom&dateTo
+Maiores fornecedores pelo valor comprado no período.
+@type method
+@author TDash
+@since 20/10/2026
+@return logical, sempre .T.
+/*/
+method getBreakdown() class TDashComApi
+    local oRequest := tdash.core.TDashRequest():new() as object
+    local oHelper  := tdash.core.TDashResponseHelper():new() as object
+    local oPeriod  := tdash.core.TDashPeriod():new() as object
+    local oRepo    := TDashComRepository():new() as object
+    local jBody    := jsonObject():new() as json
+    local aDef     := {} as array
+    local aItems   := {} as array
+    local cId      := oRequest:path("id") as character
+    local nTop     := 0 as numeric
+
+    aDef := tdash.core.u_findIndicator(comCatalog(), cId, "breakdown")
+    if Len(aDef) == 0
+        oHelper:notFound(cId, "com")
+        return .T.
+    endIf
+
+    nTop := tdash.core.u_parseInt(oRequest:query("top"), DEFAULT_TOP, 1, 50)
+    if nTop < 0
+        oHelper:badRequest("top deve estar entre 1 e 50.")
+        return .T.
+    endIf
+
+    if !oPeriod:fromQuery(oRequest:query("dateFrom"), oRequest:query("dateTo"), "none", Date())
+        oHelper:badRequest(oPeriod:cError)
+        return .T.
+    endIf
+
+    TRY
+        aItems := tdash.core.u_rowsToItems(oRepo:topSuppliers(oPeriod:dFrom, oPeriod:dTo))
+        aItems := tdash.core.u_topWithOthers(aItems, nTop, "Outros fornecedores")
+
+        jBody["id"]          := aDef[1]
+        jBody["unit"]        := aDef[4]
+        jBody["items"]       := tdash.core.u_applyShares(aItems)
+        jBody["generatedAt"] := oHelper:timestamp()
+        jBody["ttl"]         := aDef[6]
+
+        oHelper:setCacheHeaders(aDef[6])
+        oRest:setResponse(oHelper:getResponse(jBody))
+    CATCH oError
+        oHelper:serverError("TDashComApi:breakdown", oError:description)
+    ENDTRY
+return .T.
+
+/*/{Protheus.doc} getList
+GET /tdash/v1/com/list/:id?page=1&pageSize=20[&dateFrom&dateTo]
+com.po_open, com.po_late, com.po_awaiting_approval: itens de pedidos em aberto.
+com.pr_pending: itens de solicitações pendentes.
+com.trace_items: itens de solicitação emitidos no período com a quantidade solicitada, pedida e entregue (da mais
+recente para a mais antiga).
+@type method
+@author TDash
+@since 20/10/2026
+@return logical, sempre .T.
+/*/
+method getList() class TDashComApi
+    local oRequest  := tdash.core.TDashRequest():new() as object
+    local oHelper   := tdash.core.TDashResponseHelper():new() as object
+    local oPeriod   := tdash.core.TDashPeriod():new() as object
+    local oRepo     := TDashComRepository():new() as object
+    local jBody     as json
+    local aDef      := {} as array
+    local aColumns  := {} as array
+    local cId       := oRequest:path("id") as character
+    local cScope    := "open" as character
+    local nPage     := 0 as numeric
+    local nPageSize := 0 as numeric
+
+    aDef := tdash.core.u_findIndicator(comCatalog(), cId, "list")
+    if Len(aDef) == 0
+        oHelper:notFound(cId, "com")
+        return .T.
+    endIf
+
+    nPage     := tdash.core.u_parseInt(oRequest:query("page"), 1, 1, 100000)
+    nPageSize := tdash.core.u_parseInt(oRequest:query("pageSize"), DEFAULT_PAGE_SIZE, 1, 100)
+    if nPage < 0 .or. nPageSize < 0
+        oHelper:badRequest("page deve ser maior que zero e pageSize entre 1 e 100.")
+        return .T.
+    endIf
+
+    if cId == "com.trace_items" .and. !oPeriod:fromQuery(oRequest:query("dateFrom"), oRequest:query("dateTo"), "none", Date())
+        oHelper:badRequest(oPeriod:cError)
+        return .T.
+    endIf
+
+    TRY
+        if cId == "com.trace_items"
+            aAdd(aColumns, tdash.core.u_jsonColumn("document", "Solicitação", "text"))
+            aAdd(aColumns, tdash.core.u_jsonColumn("party", "Pedido", "text"))
+            aAdd(aColumns, tdash.core.u_jsonColumn("product", "Produto", "text"))
+            aAdd(aColumns, tdash.core.u_jsonColumn("um", "Unidade", "text"))
+            aAdd(aColumns, tdash.core.u_jsonColumn("requestedAt", "Emissão da solicitação", "date"))
+            aAdd(aColumns, tdash.core.u_jsonColumn("requested", "Solicitado (qtd.)", "QTY"))
+            aAdd(aColumns, tdash.core.u_jsonColumn("ordered", "Pedido (qtd.)", "QTY"))
+            aAdd(aColumns, tdash.core.u_jsonColumn("delivered", "Entregue (qtd.)", "QTY"))
+            aAdd(aColumns, tdash.core.u_jsonColumn("pctOrdered", "Virou pedido (% do solicitado)", "PCT"))
+            aAdd(aColumns, tdash.core.u_jsonColumn("pctDelivered", "Entregue (% do pedido)", "PCT"))
+            jBody := tracePage(::trace(oPeriod:dFrom, oPeriod:dTo), nPage, nPageSize)
+        elseIf cId == "com.pr_pending"
+            aAdd(aColumns, tdash.core.u_jsonColumn("document", "Solicitação", "text"))
+            aAdd(aColumns, tdash.core.u_jsonColumn("party", "Solicitante", "text"))
+            aAdd(aColumns, tdash.core.u_jsonColumn("product", "Produto", "text"))
+            aAdd(aColumns, tdash.core.u_jsonColumn("dueDate", "Emissão", "date"))
+            aAdd(aColumns, tdash.core.u_jsonColumn("quantity", "Pendente (qtd.)", "QTY"))
+            jBody := oRepo:requestItems(nPage, nPageSize)
+        else
+            do case
+                case cId == "com.po_late"
+                    cScope := "late"
+                case cId == "com.po_awaiting_approval"
+                    cScope := "approval"
+            endCase
+            aAdd(aColumns, tdash.core.u_jsonColumn("document", "Pedido", "text"))
+            aAdd(aColumns, tdash.core.u_jsonColumn("party", "Fornecedor", "text"))
+            aAdd(aColumns, tdash.core.u_jsonColumn("product", "Produto", "text"))
+            aAdd(aColumns, tdash.core.u_jsonColumn("dueDate", "Entrega", "date"))
+            aAdd(aColumns, tdash.core.u_jsonColumn("quantity", "Pendente (qtd.)", "QTY"))
+            aAdd(aColumns, tdash.core.u_jsonColumn("balance", "Pendente (R$)", "BRL"))
+            jBody := oRepo:orderItems(cScope, Date(), nPage, nPageSize)
+        endIf
+        jBody["columns"] := aColumns
+
+        oHelper:setCacheHeaders(aDef[6])
+        oRest:setResponse(oHelper:getResponse(jBody))
+    CATCH oError
+        oHelper:serverError("TDashComApi:list", oError:description)
+    ENDTRY
+return .T.
+
+/*/{Protheus.doc} kpiValue
+Calcula o valor de um cartão.
+@type method
+@author TDash
+@since 20/10/2026
+@param cId, character, id do indicador
+@param dFrom, date, início do período
+@param dTo, date, fim do período
+@param dToday, date, data de referência das posições
+@return numeric, valor
+/*/
+method kpiValue(cId as character, dFrom as date, dTo as date, dToday as date) as numeric class TDashComApi
+    local oRepo  := TDashComRepository():new() as object
+    local nValue := 0 as numeric
+
+    do case
+        case cId == "com.purchases"
+            nValue := oRepo:purchases(dFrom, dTo)
+        case cId == "com.po_open"
+            nValue := oRepo:orders("open", dToday)
+        case cId == "com.po_late"
+            nValue := oRepo:orders("late", dToday)
+        case cId == "com.po_awaiting_approval"
+            nValue := oRepo:orders("approval", dToday)
+        case cId == "com.pr_pending"
+            nValue := oRepo:pendingRequests()
+        case cId == "com.lead_time_request"
+            nValue := oRepo:leadTimeRequest(dFrom, dTo)
+        case cId == "com.lead_time_delivery"
+            nValue := oRepo:leadTimeDelivery(dFrom, dTo)
+        case cId == "com.trace_requested"
+            nValue := tdash.com.u_traceTotals(::trace(dFrom, dTo))["requestedValue"]
+        case cId == "com.trace_ordered"
+            nValue := tdash.com.u_traceTotals(::trace(dFrom, dTo))["orderedValue"]
+        case cId == "com.trace_delivered"
+            nValue := tdash.com.u_traceTotals(::trace(dFrom, dTo))["deliveredValue"]
+        case cId == "com.trace_unordered"
+            nValue := tdash.com.u_traceTotals(::trace(dFrom, dTo))["unordered"]
+    endCase
+return nValue
+
+/*/{Protheus.doc} comCatalog
+Catálogo de Compras: { id, tipos, título, unidade, sentido, ttl }.
+@type static function
+@author TDash
+@since 20/10/2026
+@return array, indicadores
+/*/
+static function comCatalog() as array
+return {;
+    { "com.purchases",             { "kpi", "series" },  "Valor comprado",                    "BRL",   "neutral",      TTL_TAT },;
+    { "com.po_open",               { "kpi", "list" },    "Pedidos de compra em aberto",       "BRL",   "neutral",      TTL_OP  },;
+    { "com.po_late",               { "kpi", "list" },    "Pedidos com entrega atrasada",      "BRL",   "down_is_good", TTL_OP  },;
+    { "com.po_awaiting_approval",  { "kpi", "list" },    "Pedidos aguardando aprovação",      "BRL",   "down_is_good", TTL_OP  },;
+    { "com.pr_pending",            { "kpi", "list" },    "Itens de solicitação pendentes",    "COUNT", "down_is_good", TTL_OP  },;
+    { "com.lead_time_request",     { "kpi" },            "Prazo solicitação até pedido",      "DAYS",  "down_is_good", TTL_EST },;
+    { "com.lead_time_delivery",    { "kpi" },            "Prazo pedido até entrega",          "DAYS",  "down_is_good", TTL_EST },;
+    { "com.top_suppliers",         { "breakdown" },      "Maiores fornecedores",              "BRL",   "neutral",      TTL_TAT },;
+    { "com.price_evolution",       { "series" },         "Preço médio dos itens mais comprados", "BRL", "down_is_good", TTL_EST },;
+    { "com.trace_requested",       { "kpi" },            "Solicitado (a preço de pedido)",    "BRL",   "neutral",      TTL_TAT },;
+    { "com.trace_ordered",         { "kpi" },            "Virou pedido",                      "BRL",   "neutral",      TTL_TAT },;
+    { "com.trace_delivered",       { "kpi" },            "Entregue (notas de entrada)",       "BRL",   "neutral",      TTL_TAT },;
+    { "com.trace_unordered",       { "kpi" },            "Itens de solicitação sem pedido",   "COUNT", "down_is_good", TTL_TAT },;
+    { "com.trace",                 { "series" },         "Solicitado x pedido x entregue",    "BRL",   "neutral",      TTL_TAT },;
+    { "com.trace_items",           { "list" },           "Acompanhamento por item",           "QTY",   "neutral",      TTL_TAT } }
+
+/*/{Protheus.doc} tracePage
+Página da lista do acompanhamento: itens da solicitação mais recente para a mais antiga.
+@type static function
+@author TDash
+@since 25/10/2026
+@param aItems, array, itens de tdash.com.u_traceItems
+@param nPage, numeric, página (1 a n)
+@param nPageSize, numeric, itens por página
+@return json, { items, total, hasNext }
+/*/
+static function tracePage(aItems as array, nPage as numeric, nPageSize as numeric) as json
+    local jResult := jsonObject():new() as json
+    local jItem   as json
+    local aSource := aClone(aItems) as array
+    local aPage   := {} as array
+    local nX      := 0 as numeric
+
+    aSort(aSource, , , {|a, b| a["emissao"] + a["numsc"] + a["itemsc"] > b["emissao"] + b["numsc"] + b["itemsc"]})
+
+    for nX := ((nPage - 1) * nPageSize) + 1 to Min(nPage * nPageSize, Len(aSource))
+        jItem := jsonObject():new()
+        jItem["document"]     := aSource[nX]["document"]
+        jItem["party"]        := aSource[nX]["party"]
+        jItem["product"]      := aSource[nX]["product"]
+        jItem["um"]           := aSource[nX]["um"]
+        jItem["requestedAt"]  := Transform(aSource[nX]["emissao"], "@R 9999-99-99")
+        jItem["requested"]    := Round(aSource[nX]["requested"], 3)
+        jItem["ordered"]      := Round(aSource[nX]["ordered"], 3)
+        jItem["delivered"]    := Round(aSource[nX]["delivered"], 3)
+        jItem["pctOrdered"]   := aSource[nX]["pctOrdered"]
+        jItem["pctDelivered"] := aSource[nX]["pctDelivered"]
+        aAdd(aPage, jItem)
+    next nX
+
+    jResult["items"]   := aPage
+    jResult["total"]   := Len(aSource)
+    jResult["hasNext"] := (nPage * nPageSize) < Len(aSource)
+return jResult

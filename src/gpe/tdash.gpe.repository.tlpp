@@ -1,0 +1,666 @@
+#include 'tlpp-core.th'
+#include 'totvs.ch'
+
+namespace tdash.gpe
+
+/*/{Protheus.doc} TDashGpeRepository
+Consultas dos indicadores de RH (SRA, SR8, RCM, SRD, SRV, CTT, SRJ). Devolvem só números agrupados; matrícula e
+datas de pessoas ficam em memória para contar e agrupar e nunca saem na resposta.
+Quadro: categorias de MV_TDCATEX (padrão autônomo e pró-labore) ficam fora. Desligamento por transferência
+(RA_RESCRAI 30 e 31) não conta. Ausência: tipos de RCM_TIPOAF 1 (afastamento) e 2 (outras ausências).
+Folha: proventos (RV_TIPOCOD = '1') da SRD, sem os roteiros de MV_TDROTEX (padrão adiantamento, 1ª parcela do 13º
+e autônomos). Regras: docs/10-catalogo-de-indicadores.md (Recursos Humanos).
+@type class
+@author TDash
+@since 21/10/2026
+@version 1.0
+/*/
+class TDashGpeRepository
+    public data aCategories as array
+    public data aRoutines as array
+
+    public method new()
+
+    public method headcount(dDate as date) as numeric
+    public method headcountBy(cDimension as character, dDate as date) as array
+    public method activePeople(dDate as date) as array
+    public method movements(cEvent as character, dFrom as date, dTo as date) as numeric
+    public method movementsByDay(cEvent as character, dFrom as date, dTo as date) as array
+    public method absences(dFrom as date, dTo as date) as array
+    public method lastClosedMonth(cUpTo as character) as character
+    public method payroll(cFrom as character, cTo as character) as array
+    public method payrollByMonth(cFrom as character, cTo as character) as array
+    public method payrollByCc(cFrom as character, cTo as character) as array
+    public method overtime(aCodes as array, cFrom as character, cTo as character) as array
+    public method overtimeByMonth(aCodes as array, cFrom as character, cTo as character) as array
+    public method countCodes(aCodes as array) as numeric
+    public method payrollCodes(nPage as numeric, nPageSize as numeric) as json
+
+    private method activeWhere() as character
+    private method bindActive(oQuery as object, nBind as numeric, dDate as date) as numeric
+    private method payrollFrom(lCostCenter as logical) as character
+    private method bindPayroll(oQuery as object, cFrom as character, cTo as character, lCostCenter as logical)
+    private method numberOf(cAlias as character, cField as character) as numeric
+endclass
+
+/*/{Protheus.doc} new
+Construtor: lê as categorias fora do quadro e os roteiros fora da folha.
+@type method
+@author TDash
+@since 21/10/2026
+/*/
+method new() class TDashGpeRepository
+    ::aCategories := codeList(cValToChar(SuperGetMV("MV_TDCATEX", .F., "A,P")))
+    ::aRoutines   := codeList(cValToChar(SuperGetMV("MV_TDROTEX", .F., "ADI,131,AUT")))
+return self
+
+/*/{Protheus.doc} headcount
+Funcionários ativos na data: admitidos até ela e sem demissão (ou demitidos depois).
+@type method
+@author TDash
+@since 21/10/2026
+@param dDate, date, data de referência
+@return numeric, quantidade de pessoas
+/*/
+method headcount(dDate as date) as numeric class TDashGpeRepository
+    local nTotal := 0 as numeric
+    local oQuery as object
+
+    oQuery := tdash.core.TDashQuery():new(" SELECT COUNT(*) TOTAL FROM " + RetSqlName("SRA") + " RA WHERE " + ::activeWhere())
+    ::bindActive(oQuery, 1, dDate)
+    if oQuery:open()
+        nTotal := ::numberOf(oQuery:getAlias(), "TOTAL")
+        oQuery:close()
+    endIf
+return nTotal
+
+/*/{Protheus.doc} headcountBy
+Ativos na data por centro de custo ou por função, do maior grupo para o menor.
+@type method
+@author TDash
+@since 21/10/2026
+@param cDimension, character, cc | role
+@param dDate, date, data de referência
+@return array, { { chave, rótulo, pessoas, pessoas }, ... } (valor e pessoas, para o agrupamento da LGPD)
+/*/
+method headcountBy(cDimension as character, dDate as date) as array class TDashGpeRepository
+    local aRows  := {} as array
+    local cQry   := "" as character
+    local cAlias := "" as character
+    local cKey   := "" as character
+    local cLabel := "" as character
+    local cTable := "CTT" as character
+    local oQuery as object
+
+    if cDimension == "role"
+        cTable := "SRJ"
+        cQry := " SELECT RA.RA_CODFUNC CHAVE, MAX(RJ.RJ_DESC) NOME, COUNT(*) PESSOAS "
+        cQry += " FROM " + RetSqlName("SRA") + " RA "
+        cQry += " LEFT JOIN " + RetSqlName("SRJ") + " RJ ON RJ.RJ_FILIAL = ? AND RJ.RJ_FUNCAO = RA.RA_CODFUNC AND RJ.D_E_L_E_T_ = ' ' "
+        cQry += " WHERE " + ::activeWhere()
+        cQry += " GROUP BY RA.RA_CODFUNC ORDER BY COUNT(*) DESC "
+    else
+        cQry := " SELECT RA.RA_CC CHAVE, MAX(CTT.CTT_DESC01) NOME, COUNT(*) PESSOAS "
+        cQry += " FROM " + RetSqlName("SRA") + " RA "
+        cQry += " LEFT JOIN " + RetSqlName("CTT") + " CTT ON CTT.CTT_FILIAL = ? AND CTT.CTT_CUSTO = RA.RA_CC AND CTT.D_E_L_E_T_ = ' ' "
+        cQry += " WHERE " + ::activeWhere()
+        cQry += " GROUP BY RA.RA_CC ORDER BY COUNT(*) DESC "
+    endIf
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    oQuery:setString(1, FWxFilial(cTable))
+    ::bindActive(oQuery, 2, dDate)
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof())
+            cKey   := AllTrim((cAlias)->CHAVE)
+            cLabel := AllTrim((cAlias)->NOME)
+            do case
+                case Empty(cKey)
+                    cLabel := "Não informado"
+                case Empty(cLabel)
+                    cLabel := cKey
+            endCase
+            aAdd(aRows, { cKey, cLabel, (cAlias)->PESSOAS, (cAlias)->PESSOAS })
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+return aRows
+
+/*/{Protheus.doc} activePeople
+Nascimento, admissão e sexo dos ativos na data, para as faixas do perfil do quadro (sem identificação).
+@type method
+@author TDash
+@since 21/10/2026
+@param dDate, date, data de referência
+@return array, { { nascimento, admissão, sexo }, ... }
+/*/
+method activePeople(dDate as date) as array class TDashGpeRepository
+    local aRows  := {} as array
+    local cAlias := "" as character
+    local oQuery as object
+
+    oQuery := tdash.core.TDashQuery():new(" SELECT RA.RA_NASC NASC, RA.RA_ADMISSA ADMISSAO, RA.RA_SEXO SEXO FROM " + RetSqlName("SRA") + " RA WHERE " + ::activeWhere())
+    ::bindActive(oQuery, 1, dDate)
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof())
+            aAdd(aRows, { SToD((cAlias)->NASC), SToD((cAlias)->ADMISSAO), AllTrim((cAlias)->SEXO) })
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+return aRows
+
+/*/{Protheus.doc} movements
+Admissões ou desligamentos no período (transferências entre filiais não contam como desligamento).
+@type method
+@author TDash
+@since 21/10/2026
+@param cEvent, character, hires | terminations
+@param dFrom, date, início
+@param dTo, date, fim
+@return numeric, quantidade de pessoas
+/*/
+method movements(cEvent as character, dFrom as date, dTo as date) as numeric class TDashGpeRepository
+    local nTotal := 0 as numeric
+    local oQuery as object
+
+    oQuery := tdash.core.TDashQuery():new(" SELECT COUNT(*) TOTAL " + movementFrom(cEvent))
+    bindMovement(oQuery, ::aCategories, dFrom, dTo)
+    if oQuery:open()
+        nTotal := ::numberOf(oQuery:getAlias(), "TOTAL")
+        oQuery:close()
+    endIf
+return nTotal
+
+/*/{Protheus.doc} movementsByDay
+Admissões ou desligamentos por dia.
+@type method
+@author TDash
+@since 21/10/2026
+@param cEvent, character, hires | terminations
+@param dFrom, date, início
+@param dTo, date, fim
+@return array, { { data AAAAMMDD, quantidade }, ... }
+/*/
+method movementsByDay(cEvent as character, dFrom as date, dTo as date) as array class TDashGpeRepository
+    local aRows  := {} as array
+    local cField := "RA.RA_DEMISSA" as character
+    local cAlias := "" as character
+    local oQuery as object
+
+    if cEvent == "hires"
+        cField := "RA.RA_ADMISSA"
+    endIf
+
+    oQuery := tdash.core.TDashQuery():new(" SELECT " + cField + " DIA, COUNT(*) TOTAL " + movementFrom(cEvent) + " GROUP BY " + cField + " ORDER BY " + cField)
+    bindMovement(oQuery, ::aCategories, dFrom, dTo)
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof())
+            aAdd(aRows, { (cAlias)->DIA, (cAlias)->TOTAL })
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+return aRows
+
+/*/{Protheus.doc} absences
+Ausências (afastamentos e outras ausências) que tocam o período, de pessoas fora das categorias excluídas.
+@type method
+@author TDash
+@since 21/10/2026
+@param dFrom, date, início
+@param dTo, date, fim
+@return array, { { matrícula, tipo, descrição do tipo, início, fim }, ... } (a matrícula só serve para contar pessoas)
+/*/
+method absences(dFrom as date, dTo as date) as array class TDashGpeRepository
+    local aRows  := {} as array
+    local cQry   := "" as character
+    local cAlias := "" as character
+    local oQuery as object
+
+    cQry := " SELECT R8.R8_MAT MAT, R8.R8_TIPOAFA TIPO, RCM.RCM_DESCRI DESCRICAO, R8.R8_DATAINI INICIO, R8.R8_DATAFIM FIM "
+    cQry += " FROM " + RetSqlName("SR8") + " R8 "
+    cQry += " INNER JOIN " + RetSqlName("RCM") + " RCM ON RCM.RCM_FILIAL = ? AND RCM.RCM_TIPO = R8.R8_TIPOAFA "
+    cQry += "   AND RCM.RCM_TIPOAF IN ('1', '2') AND RCM.D_E_L_E_T_ = ' ' "
+    // Filial de cada tabela pelo seu FWxFilial: SRA e SR8 podem ter compartilhamentos diferentes
+    cQry += " INNER JOIN " + RetSqlName("SRA") + " RA ON RA.RA_FILIAL = ? AND RA.RA_MAT = R8.R8_MAT "
+    cQry += "   AND RA.RA_CATFUNC NOT IN (?) AND RA.D_E_L_E_T_ = ' ' "
+    cQry += " WHERE R8.R8_FILIAL = ? "
+    cQry += " AND R8.R8_DATAINI <= ? "
+    cQry += " AND (R8.R8_DATAFIM = ' ' OR R8.R8_DATAFIM >= ?) "
+    cQry += " AND R8.D_E_L_E_T_ = ' ' "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    oQuery:setString(1, FWxFilial("RCM"))
+    oQuery:setString(2, FWxFilial("SRA"))
+    oQuery:setIn(3, ::aCategories)
+    oQuery:setString(4, FWxFilial("SR8"))
+    oQuery:setString(5, DToS(dTo))
+    oQuery:setString(6, DToS(dFrom))
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof())
+            aAdd(aRows, { (cAlias)->MAT, AllTrim((cAlias)->TIPO), AllTrim((cAlias)->DESCRICAO), SToD((cAlias)->INICIO), SToD((cAlias)->FIM) })
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+return aRows
+
+/*/{Protheus.doc} lastClosedMonth
+Última competência fechada (SRD) até a competência informada.
+@type method
+@author TDash
+@since 21/10/2026
+@param cUpTo, character, competência limite (AAAAMM)
+@return character, competência AAAAMM ou vazio quando não há folha fechada
+/*/
+method lastClosedMonth(cUpTo as character) as character class TDashGpeRepository
+    local cMonth := "" as character
+    local cAlias := "" as character
+    local oQuery as object
+
+    oQuery := tdash.core.TDashQuery():new(;
+        " SELECT MAX(RD.RD_DATARQ) ULTIMA FROM " + RetSqlName("SRD") + " RD " + ;
+        " WHERE RD.RD_FILIAL = ? AND RD.RD_DATARQ <= ? AND RD.RD_ROTEIR NOT IN (?) AND RD.D_E_L_E_T_ = ' ' ")
+    oQuery:setString(1, FWxFilial("SRD"))
+    oQuery:setString(2, cUpTo)
+    oQuery:setIn(3, ::aRoutines)
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        if !(cAlias)->(Eof()) .and. valType((cAlias)->ULTIMA) == "C"
+            cMonth := AllTrim((cAlias)->ULTIMA)
+        endIf
+        oQuery:close()
+    endIf
+return cMonth
+
+/*/{Protheus.doc} payroll
+Folha (proventos) das competências.
+@type method
+@author TDash
+@since 21/10/2026
+@param cFrom, character, primeira competência (AAAAMM)
+@param cTo, character, última competência (AAAAMM)
+@return array, { valor, pessoas }
+/*/
+method payroll(cFrom as character, cTo as character) as array class TDashGpeRepository
+    local aTotal := { 0, 0 } as array
+    local oQuery as object
+
+    oQuery := tdash.core.TDashQuery():new(" SELECT SUM(RD.RD_VALOR) TOTAL, COUNT(DISTINCT RD.RD_MAT) PESSOAS " + ::payrollFrom(.F.))
+    ::bindPayroll(oQuery, cFrom, cTo, .F.)
+    if oQuery:open()
+        aTotal := { ::numberOf(oQuery:getAlias(), "TOTAL"), ::numberOf(oQuery:getAlias(), "PESSOAS") }
+        oQuery:close()
+    endIf
+return aTotal
+
+/*/{Protheus.doc} payrollByMonth
+Folha (proventos) por competência.
+@type method
+@author TDash
+@since 21/10/2026
+@param cFrom, character, primeira competência (AAAAMM)
+@param cTo, character, última competência (AAAAMM)
+@return array, { { competência AAAAMM, valor, pessoas }, ... }
+/*/
+method payrollByMonth(cFrom as character, cTo as character) as array class TDashGpeRepository
+    local aRows  := {} as array
+    local cAlias := "" as character
+    local oQuery as object
+
+    oQuery := tdash.core.TDashQuery():new(;
+        " SELECT RD.RD_DATARQ MES, SUM(RD.RD_VALOR) TOTAL, COUNT(DISTINCT RD.RD_MAT) PESSOAS " + ::payrollFrom(.F.) + ;
+        " GROUP BY RD.RD_DATARQ ORDER BY RD.RD_DATARQ ")
+    ::bindPayroll(oQuery, cFrom, cTo, .F.)
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof())
+            aAdd(aRows, { AllTrim((cAlias)->MES), (cAlias)->TOTAL, (cAlias)->PESSOAS })
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+return aRows
+
+/*/{Protheus.doc} payrollByCc
+Folha (proventos) por centro de custo do lançamento.
+@type method
+@author TDash
+@since 21/10/2026
+@param cFrom, character, primeira competência (AAAAMM)
+@param cTo, character, última competência (AAAAMM)
+@return array, { { centro de custo, descrição, valor, pessoas }, ... }
+/*/
+method payrollByCc(cFrom as character, cTo as character) as array class TDashGpeRepository
+    local aRows  := {} as array
+    local cAlias := "" as character
+    local cKey   := "" as character
+    local cLabel := "" as character
+    local oQuery as object
+
+    oQuery := tdash.core.TDashQuery():new(;
+        " SELECT RD.RD_CC CHAVE, MAX(CTT.CTT_DESC01) NOME, SUM(RD.RD_VALOR) TOTAL, COUNT(DISTINCT RD.RD_MAT) PESSOAS " + ;
+        ::payrollFrom(.T.) + " GROUP BY RD.RD_CC ORDER BY SUM(RD.RD_VALOR) DESC ")
+    ::bindPayroll(oQuery, cFrom, cTo, .T.)
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof())
+            cKey   := AllTrim((cAlias)->CHAVE)
+            cLabel := AllTrim((cAlias)->NOME)
+            do case
+                case Empty(cKey)
+                    cLabel := "Sem centro de custo"
+                case Empty(cLabel)
+                    cLabel := cKey
+            endCase
+            aAdd(aRows, { cKey, cLabel, (cAlias)->TOTAL, (cAlias)->PESSOAS })
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+return aRows
+
+/*/{Protheus.doc} overtime
+Horas extras das verbas escolhidas pelo usuário, nas competências.
+@type method
+@author TDash
+@since 21/10/2026
+@param aCodes, array, verbas (RV_COD)
+@param cFrom, character, primeira competência (AAAAMM)
+@param cTo, character, última competência (AAAAMM)
+@return array, { valor, horas, pessoas }; horas só das verbas lançadas em horas (RD_TIPO1 = 'H')
+/*/
+method overtime(aCodes as array, cFrom as character, cTo as character) as array class TDashGpeRepository
+    local aTotal := { 0, 0, 0 } as array
+    local oQuery as object
+
+    oQuery := tdash.core.TDashQuery():new(;
+        " SELECT SUM(RD.RD_VALOR) TOTAL, SUM(CASE WHEN RD.RD_TIPO1 = 'H' THEN RD.RD_HORAS ELSE 0 END) HORAS, " + ;
+        " COUNT(DISTINCT RD.RD_MAT) PESSOAS " + overtimeFrom())
+    bindOvertime(oQuery, aCodes, ::aRoutines, cFrom, cTo)
+    if oQuery:open()
+        aTotal := { ::numberOf(oQuery:getAlias(), "TOTAL"), ::numberOf(oQuery:getAlias(), "HORAS"), ::numberOf(oQuery:getAlias(), "PESSOAS") }
+        oQuery:close()
+    endIf
+return aTotal
+
+/*/{Protheus.doc} overtimeByMonth
+Valor das horas extras por competência.
+@type method
+@author TDash
+@since 21/10/2026
+@param aCodes, array, verbas (RV_COD)
+@param cFrom, character, primeira competência (AAAAMM)
+@param cTo, character, última competência (AAAAMM)
+@return array, { { competência AAAAMM, valor, pessoas }, ... }
+/*/
+method overtimeByMonth(aCodes as array, cFrom as character, cTo as character) as array class TDashGpeRepository
+    local aRows  := {} as array
+    local cAlias := "" as character
+    local oQuery as object
+
+    oQuery := tdash.core.TDashQuery():new(;
+        " SELECT RD.RD_DATARQ MES, SUM(RD.RD_VALOR) TOTAL, COUNT(DISTINCT RD.RD_MAT) PESSOAS " + overtimeFrom() + ;
+        " GROUP BY RD.RD_DATARQ ORDER BY RD.RD_DATARQ ")
+    bindOvertime(oQuery, aCodes, ::aRoutines, cFrom, cTo)
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof())
+            aAdd(aRows, { AllTrim((cAlias)->MES), (cAlias)->TOTAL, (cAlias)->PESSOAS })
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+return aRows
+
+/*/{Protheus.doc} countCodes
+Quantas das verbas informadas existem na SRV da filial.
+@type method
+@author TDash
+@since 21/10/2026
+@param aCodes, array, verbas (RV_COD)
+@return numeric, quantidade encontrada
+/*/
+method countCodes(aCodes as array) as numeric class TDashGpeRepository
+    local nTotal := 0 as numeric
+    local oQuery as object
+
+    oQuery := tdash.core.TDashQuery():new(;
+        " SELECT COUNT(DISTINCT RV.RV_COD) TOTAL FROM " + RetSqlName("SRV") + " RV " + ;
+        " WHERE RV.RV_FILIAL = ? AND RV.RV_COD IN (?) AND RV.D_E_L_E_T_ = ' ' ")
+    oQuery:setString(1, FWxFilial("SRV"))
+    oQuery:setIn(2, aCodes)
+    if oQuery:open()
+        nTotal := ::numberOf(oQuery:getAlias(), "TOTAL")
+        oQuery:close()
+    endIf
+return nTotal
+
+/*/{Protheus.doc} payrollCodes
+Verbas de provento cadastradas (para o usuário escolher as de hora extra), paginadas. Não traz dado de pessoa.
+@type method
+@author TDash
+@since 21/10/2026
+@param nPage, numeric, página (a partir de 1)
+@param nPageSize, numeric, itens por página
+@return json, { items, total, hasNext }
+/*/
+method payrollCodes(nPage as numeric, nPageSize as numeric) as json class TDashGpeRepository
+    local jResult := jsonObject():new() as json
+    local jItem   as json
+    local aItems  := {} as array
+    local cFrom   := "" as character
+    local cAlias  := "" as character
+    local nTotal  := 0 as numeric
+    local oQuery  as object
+
+    cFrom := " FROM " + RetSqlName("SRV") + " RV WHERE RV.RV_FILIAL = ? AND RV.RV_TIPOCOD = '1' AND RV.D_E_L_E_T_ = ' ' "
+
+    oQuery := tdash.core.TDashQuery():new(" SELECT COUNT(*) TOTAL " + cFrom)
+    oQuery:setString(1, FWxFilial("SRV"))
+    if oQuery:open()
+        nTotal := ::numberOf(oQuery:getAlias(), "TOTAL")
+        oQuery:close()
+    endIf
+
+    oQuery := tdash.core.TDashQuery():new(" SELECT RV.RV_COD VERBA, RV.RV_DESC DESCRICAO " + cFrom + " ORDER BY RV.RV_COD ")
+    oQuery:setString(1, FWxFilial("SRV"))
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        (cAlias)->(DbSkip((nPage - 1) * nPageSize))
+        while !(cAlias)->(Eof()) .and. Len(aItems) < nPageSize
+            jItem := jsonObject():new()
+            jItem["document"] := AllTrim((cAlias)->VERBA)
+            jItem["party"]    := AllTrim((cAlias)->DESCRICAO)
+            aAdd(aItems, jItem)
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+
+    jResult["items"]   := aItems
+    jResult["total"]   := nTotal
+    jResult["hasNext"] := (nPage * nPageSize) < nTotal
+return jResult
+
+/*/{Protheus.doc} activeWhere
+WHERE dos ativos na data (alias RA). Binds: filial, data, data, categorias excluídas (ver bindActive).
+@type method
+@author TDash
+@since 21/10/2026
+@return character, condições
+/*/
+method activeWhere() as character class TDashGpeRepository
+return " RA.RA_FILIAL = ? AND RA.RA_ADMISSA <= ? AND (RA.RA_DEMISSA = ' ' OR RA.RA_DEMISSA > ?) " + ;
+    " AND RA.RA_CATFUNC NOT IN (?) AND RA.D_E_L_E_T_ = ' ' "
+
+/*/{Protheus.doc} bindActive
+Binds de activeWhere a partir da posição nBind.
+@type method
+@author TDash
+@since 21/10/2026
+@return numeric, próxima posição livre
+/*/
+method bindActive(oQuery as object, nBind as numeric, dDate as date) as numeric class TDashGpeRepository
+    oQuery:setString(nBind, FWxFilial("SRA"))
+    oQuery:setString(nBind + 1, DToS(dDate))
+    oQuery:setString(nBind + 2, DToS(dDate))
+    oQuery:setIn(nBind + 3, ::aCategories)
+return nBind + 4
+
+/*/{Protheus.doc} payrollFrom
+FROM/WHERE da folha: proventos da SRD nas competências, fora os roteiros excluídos.
+Binds: SRV filial, CTT filial (com lCostCenter), SRD filial, competência inicial, final, roteiros (ver bindPayroll).
+@type method
+@author TDash
+@since 21/10/2026
+@param lCostCenter, logical, .T. junta a CTT (alias CTT) para a descrição do centro de custo
+@return character, cláusulas
+/*/
+method payrollFrom(lCostCenter as logical) as character class TDashGpeRepository
+    local cFrom := "" as character
+
+    cFrom := " FROM " + RetSqlName("SRD") + " RD "
+    cFrom += " INNER JOIN " + RetSqlName("SRV") + " RV ON RV.RV_FILIAL = ? AND RV.RV_COD = RD.RD_PD "
+    cFrom += "   AND RV.RV_TIPOCOD = '1' AND RV.D_E_L_E_T_ = ' ' "
+    if lCostCenter
+        cFrom += " LEFT JOIN " + RetSqlName("CTT") + " CTT ON CTT.CTT_FILIAL = ? AND CTT.CTT_CUSTO = RD.RD_CC AND CTT.D_E_L_E_T_ = ' ' "
+    endIf
+    cFrom += " WHERE RD.RD_FILIAL = ? "
+    cFrom += " AND RD.RD_DATARQ BETWEEN ? AND ? "
+    cFrom += " AND RD.RD_ROTEIR NOT IN (?) "
+    cFrom += " AND RD.D_E_L_E_T_ = ' ' "
+return cFrom
+
+/*/{Protheus.doc} bindPayroll
+Binds de payrollFrom, na ordem do SQL.
+@type method
+@author TDash
+@since 21/10/2026
+/*/
+method bindPayroll(oQuery as object, cFrom as character, cTo as character, lCostCenter as logical) class TDashGpeRepository
+    local nBind := 1 as numeric
+
+    oQuery:setString(nBind++, FWxFilial("SRV"))
+    if lCostCenter
+        oQuery:setString(nBind++, FWxFilial("CTT"))
+    endIf
+    oQuery:setString(nBind++, FWxFilial("SRD"))
+    oQuery:setString(nBind++, cFrom)
+    oQuery:setString(nBind++, cTo)
+    oQuery:setIn(nBind, ::aRoutines)
+return
+
+/*/{Protheus.doc} numberOf
+Valor numérico de um campo da linha atual; 0 quando nulo (ex.: SUM sem linhas).
+@type method
+@author TDash
+@since 21/10/2026
+@return numeric, valor ou 0
+/*/
+method numberOf(cAlias as character, cField as character) as numeric class TDashGpeRepository
+    local nValue := 0 as numeric
+    local xValue
+
+    if !(cAlias)->(Eof())
+        xValue := (cAlias)->(FieldGet(FieldPos(cField)))
+        if valType(xValue) == "N"
+            nValue := xValue
+        endIf
+    endIf
+return nValue
+
+/*/{Protheus.doc} codeList
+Lista "A,B,C" de um parâmetro em array; nunca vazia (um NOT IN vazio quebraria o SQL).
+@type static function
+@author TDash
+@since 21/10/2026
+@param cValue, character, conteúdo do parâmetro
+@return array, códigos
+/*/
+static function codeList(cValue as character) as array
+    local aCodes := {} as array
+    local aParts := StrTokArr2(AllTrim(cValue), ",", .F.) as array
+    local nX     := 0 as numeric
+
+    for nX := 1 to Len(aParts)
+        if !Empty(aParts[nX])
+            aAdd(aCodes, AllTrim(aParts[nX]))
+        endIf
+    next nX
+    if Len(aCodes) == 0
+        aAdd(aCodes, "#")
+    endIf
+return aCodes
+
+/*/{Protheus.doc} movementFrom
+FROM/WHERE de admissões ou desligamentos. Binds: filial, data inicial, final, categorias (ver bindMovement).
+@type static function
+@author TDash
+@since 21/10/2026
+@param cEvent, character, hires | terminations
+@return character, cláusulas
+/*/
+static function movementFrom(cEvent as character) as character
+    local cFrom := " FROM " + RetSqlName("SRA") + " RA WHERE RA.RA_FILIAL = ? " as character
+
+    if cEvent == "hires"
+        cFrom += " AND RA.RA_ADMISSA BETWEEN ? AND ? "
+    else
+        cFrom += " AND RA.RA_DEMISSA BETWEEN ? AND ? "
+        cFrom += " AND RA.RA_RESCRAI NOT IN ('30', '31') "
+    endIf
+    cFrom += " AND RA.RA_CATFUNC NOT IN (?) "
+    cFrom += " AND RA.D_E_L_E_T_ = ' ' "
+return cFrom
+
+/*/{Protheus.doc} bindMovement
+Binds de movementFrom.
+@type static function
+@author TDash
+@since 21/10/2026
+/*/
+static function bindMovement(oQuery as object, aCategories as array, dFrom as date, dTo as date)
+    oQuery:setString(1, FWxFilial("SRA"))
+    oQuery:setString(2, DToS(dFrom))
+    oQuery:setString(3, DToS(dTo))
+    oQuery:setIn(4, aCategories)
+return
+
+/*/{Protheus.doc} overtimeFrom
+FROM/WHERE das horas extras. Binds: filial, competência inicial, final, verbas, roteiros (ver bindOvertime).
+@type static function
+@author TDash
+@since 21/10/2026
+@return character, cláusulas
+/*/
+static function overtimeFrom() as character
+    local cFrom := "" as character
+
+    cFrom := " FROM " + RetSqlName("SRD") + " RD "
+    cFrom += " WHERE RD.RD_FILIAL = ? "
+    cFrom += " AND RD.RD_DATARQ BETWEEN ? AND ? "
+    cFrom += " AND RD.RD_PD IN (?) "
+    cFrom += " AND RD.RD_ROTEIR NOT IN (?) "
+    cFrom += " AND RD.D_E_L_E_T_ = ' ' "
+return cFrom
+
+/*/{Protheus.doc} bindOvertime
+Binds de overtimeFrom.
+@type static function
+@author TDash
+@since 21/10/2026
+/*/
+static function bindOvertime(oQuery as object, aCodes as array, aRoutines as array, cFrom as character, cTo as character)
+    oQuery:setString(1, FWxFilial("SRD"))
+    oQuery:setString(2, cFrom)
+    oQuery:setString(3, cTo)
+    oQuery:setIn(4, aCodes)
+    oQuery:setIn(5, aRoutines)
+return

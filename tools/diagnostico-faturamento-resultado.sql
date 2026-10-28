@@ -1,0 +1,189 @@
+-- TDash: diagnostico do Faturamento  lucro bruto, lucro liquido e impostos (SD2, SD1, SF4)
+--
+-- SOMENTE LEITURA: so SELECT, nada e criado nem alterado. So traz totais por campo e por mes, sem dado de cliente.
+-- Objetivo: descobrir quais campos de custo e de imposto (inclusive IBS e CBS da reforma tributaria) existem e tem
+-- valor neste cliente, para montar o grafico "lucro bruto  lucro liquido (colunas) e impostos (linha)".
+-- Regra definida com o cliente (23/10/2026):
+--   venda          = valor das mercadorias (D2_TOTAL) das saidas normais com TES que gera duplicata, menos as devolucoes
+--   lucro bruto    = venda  custo (D2_CUSTO1; devolucoes: D1_CUSTO)
+--   impostos       = soma de todos os impostos da nota (ICMS, IPI, ICMS-ST, PIS, COFINS, ISS, IBS, CBS...)
+--   lucro liquido  = lucro bruto  impostos
+--
+-- Antes de rodar:
+--   * Troque o sufixo 010 (empresa 01) pelo da empresa que o TDash vai usar (SD2010, SD1010, SX3010...).
+--   * @FILIAL: NULL = todas as filiais, ou o codigo como gravado em D2_FILIAL (qualquer tamanho).
+--   * Escrito para SQL Server. As consultas 1 a 4 leem o dicionario no banco (SX2/SX3); se o ambiente usa dicionario
+--     em arquivo, pule essas e mande so as consultas 5 em diante.
+--   * Periodo: ultimos 12 meses (D2_EMISSAO para saidas, D1_DTDIGIT para devolucoes).
+--   * IBS e CBS (reforma tributaria) vem do Configurador de Tributos, nas tabelas F2D e CJ3, ligadas ao item da nota
+--     pelo ID do tributo: D2_IDTRIB = F2D_IDREL. As consultas 10 a 14 mostram a estrutura dessas tabelas e conferem
+--     as duas ligacoes possiveis com a CJ3 (CJ3_IDF2D = F2D_ID e CJ3_IDTGEN = D2_IDTRIB).
+--   * Mande o resultado de cada consulta numerada (print ou CSV).
+
+DECLARE @FILIAL VARCHAR(20) = NULL;
+DECLARE @DESDE  CHAR(8) = CONVERT(CHAR(8), DATEADD(MONTH, -12, GETDATE()), 112);
+
+-- 1) Campos numericos do SD2 ligados a custo, valor e imposto (inclui qualquer campo com IBS, CBS ou "IS")
+SELECT RTRIM(X3_CAMPO) AS CAMPO, RTRIM(X3_TITULO) AS TITULO, RTRIM(X3_DESCRIC) AS DESCRICAO,
+       X3_TAMANHO AS TAMANHO, X3_DECIMAL AS DECIMAIS, X3_CONTEXT AS CONTEXTO
+FROM SX3010
+WHERE D_E_L_E_T_ = ' ' AND X3_ARQUIVO = 'SD2' AND X3_TIPO = 'N'
+  AND (X3_CAMPO LIKE 'D2[_]VAL%' OR X3_CAMPO LIKE 'D2[_]CUSTO%' OR X3_CAMPO LIKE 'D2[_]TOTAL%'
+       OR X3_CAMPO LIKE 'D2[_]ICM%' OR X3_CAMPO LIKE 'D2[_]IPI%' OR X3_CAMPO LIKE 'D2[_]DESCON%'
+       OR X3_CAMPO LIKE 'D2[_]DESPESA%' OR X3_CAMPO LIKE 'D2[_]SEGURO%' OR X3_CAMPO LIKE 'D2[_]IBS%'
+       OR X3_CAMPO LIKE 'D2[_]CBS%' OR X3_CAMPO LIKE 'D2[_]IS[_]%' OR X3_CAMPO LIKE 'D2[_]CRED%'
+       OR RTRIM(X3_TITULO) LIKE '%IBS%' OR RTRIM(X3_TITULO) LIKE '%CBS%'
+       OR RTRIM(X3_DESCRIC) LIKE '%IBS%' OR RTRIM(X3_DESCRIC) LIKE '%CBS%' OR RTRIM(X3_DESCRIC) LIKE '%Seletivo%')
+ORDER BY X3_ORDEM;
+
+-- 2) O mesmo para os itens da nota de entrada (SD1), usados nas devolucoes
+SELECT RTRIM(X3_CAMPO) AS CAMPO, RTRIM(X3_TITULO) AS TITULO, RTRIM(X3_DESCRIC) AS DESCRICAO,
+       X3_TAMANHO AS TAMANHO, X3_DECIMAL AS DECIMAIS, X3_CONTEXT AS CONTEXTO
+FROM SX3010
+WHERE D_E_L_E_T_ = ' ' AND X3_ARQUIVO = 'SD1' AND X3_TIPO = 'N'
+  AND (X3_CAMPO LIKE 'D1[_]VAL%' OR X3_CAMPO LIKE 'D1[_]CUSTO%' OR X3_CAMPO LIKE 'D1[_]TOTAL%'
+       OR X3_CAMPO LIKE 'D1[_]ICM%' OR X3_CAMPO LIKE 'D1[_]IPI%' OR X3_CAMPO LIKE 'D1[_]DESC%'
+       OR X3_CAMPO LIKE 'D1[_]DESPESA%' OR X3_CAMPO LIKE 'D1[_]SEGURO%' OR X3_CAMPO LIKE 'D1[_]IBS%'
+       OR X3_CAMPO LIKE 'D1[_]CBS%' OR X3_CAMPO LIKE 'D1[_]IS[_]%'
+       OR RTRIM(X3_TITULO) LIKE '%IBS%' OR RTRIM(X3_TITULO) LIKE '%CBS%'
+       OR RTRIM(X3_DESCRIC) LIKE '%IBS%' OR RTRIM(X3_DESCRIC) LIKE '%CBS%' OR RTRIM(X3_DESCRIC) LIKE '%Seletivo%')
+ORDER BY X3_ORDEM;
+
+-- 3) Outros campos de IBS/CBS em tabelas fiscais do faturamento (cabecalho SF2/SF3/SFT e SD2)
+SELECT RTRIM(X3_ARQUIVO) AS TABELA, RTRIM(X3_CAMPO) AS CAMPO, RTRIM(X3_TITULO) AS TITULO, RTRIM(X3_DESCRIC) AS DESCRICAO
+FROM SX3010
+WHERE D_E_L_E_T_ = ' ' AND X3_ARQUIVO IN ('SF2', 'SF3', 'SFT', 'SD2', 'SF4')
+  AND (X3_CAMPO LIKE '%IBS%' OR X3_CAMPO LIKE '%CBS%' OR RTRIM(X3_TITULO) LIKE '%IBS%' OR RTRIM(X3_TITULO) LIKE '%CBS%'
+       OR RTRIM(X3_DESCRIC) LIKE '%IBS%' OR RTRIM(X3_DESCRIC) LIKE '%CBS%')
+ORDER BY X3_ARQUIVO, X3_ORDEM;
+
+-- 4) Tabelas novas da reforma tributaria no dicionario (nome com IBS, CBS ou Seletivo)
+SELECT RTRIM(X2_CHAVE) AS TABELA, RTRIM(X2_NOME) AS NOME
+FROM SX2010
+WHERE D_E_L_E_T_ = ' '
+  AND (RTRIM(X2_NOME) LIKE '%IBS%' OR RTRIM(X2_NOME) LIKE '%CBS%' OR RTRIM(X2_NOME) LIKE '%Seletivo%'
+       OR RTRIM(X2_NOME) LIKE '%Reforma%')
+ORDER BY X2_CHAVE;
+
+-- 5) SD2: total e itens com valor, por campo (campos da consulta 1; saidas normais com TES que gera duplicata)
+DECLARE @sql NVARCHAR(MAX) = N'';
+SELECT @sql = @sql + CASE WHEN @sql = N'' THEN N'' ELSE N' UNION ALL ' END
+  + N'SELECT ''' + RTRIM(X3_CAMPO) + N''' AS CAMPO, SUM(' + RTRIM(X3_CAMPO) + N') AS TOTAL, '
+  + N'SUM(CASE WHEN ' + RTRIM(X3_CAMPO) + N' <> 0 THEN 1 ELSE 0 END) AS ITENS_COM_VALOR, COUNT(*) AS ITENS '
+  + N'FROM SD2010 D2 WHERE D2.D_E_L_E_T_ = '' '' AND D2.D2_TIPO = ''N'' AND D2.D2_EMISSAO >= @DESDE '
+  + N'AND (@FILIAL IS NULL OR D2.D2_FILIAL = @FILIAL) '
+  + N'AND EXISTS (SELECT 1 FROM SF4010 F4 WHERE F4.F4_CODIGO = D2.D2_TES AND F4.F4_DUPLIC = ''S'' AND F4.D_E_L_E_T_ = '' '')'
+FROM SX3010
+WHERE D_E_L_E_T_ = ' ' AND X3_ARQUIVO = 'SD2' AND X3_TIPO = 'N' AND X3_CONTEXT <> 'V'
+  AND (X3_CAMPO LIKE 'D2[_]VAL%' OR X3_CAMPO LIKE 'D2[_]CUSTO%' OR X3_CAMPO LIKE 'D2[_]TOTAL%'
+       OR X3_CAMPO LIKE 'D2[_]ICM%' OR X3_CAMPO LIKE 'D2[_]IPI%' OR X3_CAMPO LIKE 'D2[_]DESCON%'
+       OR X3_CAMPO LIKE 'D2[_]DESPESA%' OR X3_CAMPO LIKE 'D2[_]SEGURO%' OR X3_CAMPO LIKE 'D2[_]IBS%'
+       OR X3_CAMPO LIKE 'D2[_]CBS%' OR X3_CAMPO LIKE 'D2[_]IS[_]%' OR X3_CAMPO LIKE 'D2[_]CRED%'
+       OR RTRIM(X3_TITULO) LIKE '%IBS%' OR RTRIM(X3_TITULO) LIKE '%CBS%'
+       OR RTRIM(X3_DESCRIC) LIKE '%IBS%' OR RTRIM(X3_DESCRIC) LIKE '%CBS%' OR RTRIM(X3_DESCRIC) LIKE '%Seletivo%');
+SET @sql = N'SELECT * FROM (' + @sql + N') X ORDER BY CAMPO';
+EXEC sp_executesql @sql, N'@DESDE CHAR(8), @FILIAL VARCHAR(20)', @DESDE = @DESDE, @FILIAL = @FILIAL;
+
+-- 6) SD1 (devolucoes, D1_TIPO = 'D'): total e itens com valor, por campo (campos da consulta 2)
+DECLARE @sql1 NVARCHAR(MAX) = N'';
+SELECT @sql1 = @sql1 + CASE WHEN @sql1 = N'' THEN N'' ELSE N' UNION ALL ' END
+  + N'SELECT ''' + RTRIM(X3_CAMPO) + N''' AS CAMPO, SUM(' + RTRIM(X3_CAMPO) + N') AS TOTAL, '
+  + N'SUM(CASE WHEN ' + RTRIM(X3_CAMPO) + N' <> 0 THEN 1 ELSE 0 END) AS ITENS_COM_VALOR, COUNT(*) AS ITENS '
+  + N'FROM SD1010 D1 WHERE D1.D_E_L_E_T_ = '' '' AND D1.D1_TIPO = ''D'' AND D1.D1_DTDIGIT >= @DESDE '
+  + N'AND (@FILIAL IS NULL OR D1.D1_FILIAL = @FILIAL)'
+FROM SX3010
+WHERE D_E_L_E_T_ = ' ' AND X3_ARQUIVO = 'SD1' AND X3_TIPO = 'N' AND X3_CONTEXT <> 'V'
+  AND (X3_CAMPO LIKE 'D1[_]VAL%' OR X3_CAMPO LIKE 'D1[_]CUSTO%' OR X3_CAMPO LIKE 'D1[_]TOTAL%'
+       OR X3_CAMPO LIKE 'D1[_]ICM%' OR X3_CAMPO LIKE 'D1[_]IPI%' OR X3_CAMPO LIKE 'D1[_]DESC%'
+       OR X3_CAMPO LIKE 'D1[_]DESPESA%' OR X3_CAMPO LIKE 'D1[_]SEGURO%' OR X3_CAMPO LIKE 'D1[_]IBS%'
+       OR X3_CAMPO LIKE 'D1[_]CBS%' OR X3_CAMPO LIKE 'D1[_]IS[_]%'
+       OR RTRIM(X3_TITULO) LIKE '%IBS%' OR RTRIM(X3_TITULO) LIKE '%CBS%'
+       OR RTRIM(X3_DESCRIC) LIKE '%IBS%' OR RTRIM(X3_DESCRIC) LIKE '%CBS%' OR RTRIM(X3_DESCRIC) LIKE '%Seletivo%');
+SET @sql1 = N'SELECT * FROM (' + @sql1 + N') X ORDER BY CAMPO';
+EXEC sp_executesql @sql1, N'@DESDE CHAR(8), @FILIAL VARCHAR(20)', @DESDE = @DESDE, @FILIAL = @FILIAL;
+
+-- 7) Por mes (saidas normais com duplicata): valor da nota x mercadorias x custo e os impostos classicos.
+--    Serve para conferir se D2_VALBRUT  D2_TOTAL + IPI + ICMS-ST + frete/despesa/seguro  desconto.
+SELECT SUBSTRING(D2.D2_EMISSAO, 1, 6) AS MES,
+       SUM(D2.D2_VALBRUT) AS VALBRUT, SUM(D2.D2_TOTAL) AS TOTAL_MERCADORIAS, SUM(D2.D2_CUSTO1) AS CUSTO1,
+       SUM(D2.D2_VALICM) AS ICMS, SUM(D2.D2_VALIPI) AS IPI, SUM(D2.D2_ICMSRET) AS ICMS_ST,
+       SUM(D2.D2_VALBRUT) - SUM(D2.D2_TOTAL) AS DIF_BRUTO_MENOS_MERCADORIAS,
+       SUM(D2.D2_VALIPI + D2.D2_ICMSRET + D2.D2_VALFRE + D2.D2_DESPESA + D2.D2_SEGURO - D2.D2_DESCON) AS IPI_ST_FRETE_DESP_SEG_MENOS_DESC,
+       SUM(CASE WHEN D2.D2_CUSTO1 = 0 THEN 1 ELSE 0 END) AS ITENS_SEM_CUSTO, COUNT(*) AS ITENS
+FROM SD2010 D2
+WHERE D2.D_E_L_E_T_ = ' ' AND D2.D2_TIPO = 'N' AND D2.D2_EMISSAO >= @DESDE
+  AND (@FILIAL IS NULL OR D2.D2_FILIAL = @FILIAL)
+  AND EXISTS (SELECT 1 FROM SF4010 F4 WHERE F4.F4_CODIGO = D2.D2_TES AND F4.F4_DUPLIC = 'S' AND F4.D_E_L_E_T_ = ' ')
+GROUP BY SUBSTRING(D2.D2_EMISSAO, 1, 6)
+ORDER BY MES;
+
+-- 8) Itens vendidos sem custo (D2_CUSTO1 = 0): que tipo de produto sao? (so contagens por tipo de produto)
+SELECT B1.B1_TIPO AS TIPO_PRODUTO, COUNT(*) AS ITENS, SUM(D2.D2_TOTAL) AS TOTAL_MERCADORIAS
+FROM SD2010 D2
+LEFT JOIN SB1010 B1 ON B1.B1_COD = D2.D2_COD AND B1.D_E_L_E_T_ = ' '
+WHERE D2.D_E_L_E_T_ = ' ' AND D2.D2_TIPO = 'N' AND D2.D2_EMISSAO >= @DESDE AND D2.D2_CUSTO1 = 0
+  AND (@FILIAL IS NULL OR D2.D2_FILIAL = @FILIAL)
+  AND EXISTS (SELECT 1 FROM SF4010 F4 WHERE F4.F4_CODIGO = D2.D2_TES AND F4.F4_DUPLIC = 'S' AND F4.D_E_L_E_T_ = ' ')
+GROUP BY B1.B1_TIPO
+ORDER BY ITENS DESC;
+
+-- 9) SF4: TES de saida que geram duplicata mas nao geram imposto (F4_ICM, F4_IPI, F4_PISCOF = 'N'), por TES
+SELECT F4.F4_CODIGO AS TES, RTRIM(F4.F4_TEXTO) AS TEXTO, F4.F4_ICM AS ICMS, F4.F4_IPI AS IPI, F4.F4_PISCOF AS PIS_COFINS,
+       COUNT(D2.D2_TES) AS ITENS_NO_PERIODO
+FROM SF4010 F4
+INNER JOIN SD2010 D2 ON D2.D2_TES = F4.F4_CODIGO AND D2.D_E_L_E_T_ = ' ' AND D2.D2_TIPO = 'N' AND D2.D2_EMISSAO >= @DESDE
+                     AND (@FILIAL IS NULL OR D2.D2_FILIAL = @FILIAL)
+WHERE F4.D_E_L_E_T_ = ' ' AND F4.F4_DUPLIC = 'S'
+GROUP BY F4.F4_CODIGO, F4.F4_TEXTO, F4.F4_ICM, F4.F4_IPI, F4.F4_PISCOF
+ORDER BY ITENS_NO_PERIODO DESC;
+
+-- 10) Campos da F2D e da CJ3 (procure o campo do tipo de imposto/tributo e os de base, aliquota e valor)
+SELECT RTRIM(X3_ARQUIVO) AS TABELA, RTRIM(X3_CAMPO) AS CAMPO, RTRIM(X3_TITULO) AS TITULO, RTRIM(X3_DESCRIC) AS DESCRICAO,
+       X3_TIPO AS TIPO, X3_TAMANHO AS TAMANHO, X3_DECIMAL AS DECIMAIS, X3_CONTEXT AS CONTEXTO
+FROM SX3010
+WHERE D_E_L_E_T_ = ' ' AND X3_ARQUIVO IN ('F2D', 'CJ3')
+ORDER BY X3_ARQUIVO, X3_ORDEM;
+
+-- 11) Nome e compartilhamento das tabelas F2D e CJ3 e seus indices
+SELECT RTRIM(X2_CHAVE) AS TABELA, RTRIM(X2_NOME) AS NOME, X2_MODOEMP AS MODO_EMPRESA, X2_MODOUN AS MODO_UNIDADE, X2_MODO AS MODO_FILIAL
+FROM SX2010 WHERE D_E_L_E_T_ = ' ' AND X2_CHAVE IN ('F2D', 'CJ3') ORDER BY X2_CHAVE;
+
+SELECT INDICE AS TABELA, ORDEM, CHAVE, DESCRICAO
+FROM SIX010 WHERE D_E_L_E_T_ = ' ' AND INDICE IN ('F2D', 'CJ3') ORDER BY INDICE, ORDEM;
+
+-- 12) Amostra: 5 linhas de cada tabela, todas as colunas (valores e codigos de tributo; sem dado de pessoa)
+SELECT TOP 5 * FROM F2D010 WHERE D_E_L_E_T_ = ' ' ORDER BY R_E_C_N_O_ DESC;
+SELECT TOP 5 * FROM CJ3010 WHERE D_E_L_E_T_ = ' ' ORDER BY R_E_C_N_O_ DESC;
+
+-- 13) Cobertura nas saidas do periodo: quantos itens tem ID de tributo e acham F2D e CJ3 (pelas duas ligacoes)
+SELECT COUNT(*) AS ITENS_SD2,
+       SUM(COM_IDTRIB) AS COM_IDTRIB,
+       SUM(ACHA_F2D) AS ACHA_F2D,
+       SUM(ACHA_CJ3_PELO_IDF2D) AS ACHA_CJ3_PELO_IDF2D,
+       SUM(ACHA_CJ3_PELO_IDTGEN) AS ACHA_CJ3_PELO_IDTGEN
+FROM (
+  SELECT CASE WHEN D2.D2_IDTRIB <> ' ' THEN 1 ELSE 0 END AS COM_IDTRIB,
+         CASE WHEN EXISTS (SELECT 1 FROM F2D010 F2 WHERE F2.F2D_IDREL = D2.D2_IDTRIB AND F2.D_E_L_E_T_ = ' ') THEN 1 ELSE 0 END AS ACHA_F2D,
+         CASE WHEN EXISTS (SELECT 1 FROM F2D010 F2 INNER JOIN CJ3010 J3 ON J3.CJ3_IDF2D = F2.F2D_ID AND J3.D_E_L_E_T_ = ' '
+                           WHERE F2.F2D_IDREL = D2.D2_IDTRIB AND F2.D_E_L_E_T_ = ' ') THEN 1 ELSE 0 END AS ACHA_CJ3_PELO_IDF2D,
+         CASE WHEN EXISTS (SELECT 1 FROM CJ3010 J3 WHERE J3.CJ3_IDTGEN = D2.D2_IDTRIB AND J3.D_E_L_E_T_ = ' ') THEN 1 ELSE 0 END AS ACHA_CJ3_PELO_IDTGEN
+  FROM SD2010 D2
+  WHERE D2.D_E_L_E_T_ = ' ' AND D2.D2_TIPO = 'N' AND D2.D2_EMISSAO >= @DESDE
+    AND (@FILIAL IS NULL OR D2.D2_FILIAL = @FILIAL)
+    AND EXISTS (SELECT 1 FROM SF4010 F4 WHERE F4.F4_CODIGO = D2.D2_TES AND F4.F4_DUPLIC = 'S' AND F4.D_E_L_E_T_ = ' ')
+) X;
+
+-- 14) Quantas linhas de F2D e de CJ3 cada item de nota gera (se for mais de uma, o valor precisa ser somado por item)
+SELECT QTD_F2D, QTD_CJ3_PELO_IDF2D, COUNT(*) AS ITENS
+FROM (
+  SELECT D2.D2_IDTRIB,
+         (SELECT COUNT(*) FROM F2D010 F2 WHERE F2.F2D_IDREL = D2.D2_IDTRIB AND F2.D_E_L_E_T_ = ' ') AS QTD_F2D,
+         (SELECT COUNT(*) FROM F2D010 F2 INNER JOIN CJ3010 J3 ON J3.CJ3_IDF2D = F2.F2D_ID AND J3.D_E_L_E_T_ = ' '
+          WHERE F2.F2D_IDREL = D2.D2_IDTRIB AND F2.D_E_L_E_T_ = ' ') AS QTD_CJ3_PELO_IDF2D
+  FROM SD2010 D2
+  WHERE D2.D_E_L_E_T_ = ' ' AND D2.D2_TIPO = 'N' AND D2.D2_EMISSAO >= @DESDE AND D2.D2_IDTRIB <> ' '
+    AND (@FILIAL IS NULL OR D2.D2_FILIAL = @FILIAL)
+    AND EXISTS (SELECT 1 FROM SF4010 F4 WHERE F4.F4_CODIGO = D2.D2_TES AND F4.F4_DUPLIC = 'S' AND F4.D_E_L_E_T_ = ' ')
+) X
+GROUP BY QTD_F2D, QTD_CJ3_PELO_IDF2D
+ORDER BY QTD_F2D, QTD_CJ3_PELO_IDF2D;

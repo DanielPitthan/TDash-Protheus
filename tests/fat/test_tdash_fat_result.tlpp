@@ -1,0 +1,136 @@
+#include "tlpp-core.th"
+#include "tlpp-probat.th"
+
+namespace tests.fat
+
+/*/{Protheus.doc} test_tdash_fat_result
+Testes PROBAT do resultado das vendas (lucro bruto, lucro líquido e impostos), sem banco.
+Exemplo da regra: venda 1.000 com custo 600 e devolução 100 com custo 60 = lucro bruto 360.
+Execução: appserver.exe -console -consolelog -run=tlpp.probat.run -env={AMBIENTE}
+@type class
+@author TDash
+@since 26/10/2026
+/*/
+@TestFixture()
+Class test_tdash_fat_result
+    Public Method New() as Object
+
+    @Test('resultSum: devolução desconta venda, custo e impostos')
+    Public Method resultSum_Return_IsSubtracted() as Logical
+
+    @Test('resultSum: regime atual soma PIS e COFINS, não CBS e IBS')
+    Public Method resultSum_Current_UsesPisCofins() as Logical
+
+    @Test('resultSum: regime da reforma soma CBS e IBS, não PIS e COFINS')
+    Public Method resultSum_Reform_UsesCbsIbs() as Logical
+
+    @Test('resultSum: mais de 2% da venda sem custo marca custo incompleto')
+    Public Method resultSum_Uncosted_FlagsIncomplete() as Logical
+
+    @Test('resultMonths: agrupa por mês na ordem')
+    Public Method resultMonths_GroupsByMonth() as Logical
+
+    @Test('taxItems: marca o par fora do total e omite zerados')
+    Public Method taxItems_MarksOutOfTotal() as Logical
+
+    @Test('isTaxRegime: aceita vazio, current e reform')
+    Public Method isTaxRegime_Values() as Logical
+EndClass
+
+Method New() as Object Class test_tdash_fat_result
+Return Self
+
+Static Function newRow(cDay as character, cKind as character, nRevenue as numeric, nCost as numeric, nUncosted as numeric, nIcms as numeric, nPis as numeric, nCofins as numeric, nCbs as numeric, nIbs as numeric) as json
+    local jRow := jsonObject():new() as json
+
+    jRow["day"]      := cDay
+    jRow["kind"]     := cKind
+    jRow["revenue"]  := nRevenue
+    jRow["cost"]     := nCost
+    jRow["uncosted"] := nUncosted
+    jRow["icms"]     := nIcms
+    jRow["ipi"]      := 0
+    jRow["st"]       := 0
+    jRow["pis"]      := nPis
+    jRow["cofins"]   := nCofins
+    jRow["iss"]      := 0
+    jRow["cbs"]      := nCbs
+    jRow["ibs"]      := nIbs
+return jRow
+
+Method resultSum_Return_IsSubtracted() as Logical Class test_tdash_fat_result
+    local jSum := tdash.fat.u_resultSum({;
+        newRow("20261001", "sale", 1000, 600, 0, 120, 16.5, 76, 0, 0),;
+        newRow("20261005", "return", 100, 60, 0, 12, 1.65, 7.6, 0, 0) }, .F.) as json
+
+    tlpp.probat.assertEquals(jSum["revenue"], 900)
+    tlpp.probat.assertEquals(jSum["cost"], 540)
+    tlpp.probat.assertEquals(jSum["gross"], 360)
+    tlpp.probat.assertEquals(jSum["icms"], 108)
+    tlpp.probat.assertEquals(jSum["taxes"], 191.25)
+    tlpp.probat.assertEquals(jSum["net"], 168.75)
+Return .T.
+
+Method resultSum_Current_UsesPisCofins() as Logical Class test_tdash_fat_result
+    local jSum := tdash.fat.u_resultSum({ newRow("20261001", "sale", 1000, 600, 0, 120, 16.5, 76, 9, 1) }, .F.) as json
+
+    tlpp.probat.assertEquals(jSum["taxes"], 212.5)
+    tlpp.probat.assertEquals(jSum["net"], 187.5)
+    tlpp.probat.assertEquals(jSum["cbs"], 9)
+Return .T.
+
+Method resultSum_Reform_UsesCbsIbs() as Logical Class test_tdash_fat_result
+    local jSum := tdash.fat.u_resultSum({ newRow("20261001", "sale", 1000, 600, 0, 120, 16.5, 76, 9, 1) }, .T.) as json
+
+    tlpp.probat.assertEquals(jSum["taxes"], 130)
+    tlpp.probat.assertEquals(jSum["net"], 270)
+    tlpp.probat.assertEquals(jSum["pis"], 16.5)
+Return .T.
+
+Method resultSum_Uncosted_FlagsIncomplete() as Logical Class test_tdash_fat_result
+    local jLow  := tdash.fat.u_resultSum({ newRow("20261001", "sale", 1000, 600, 20, 0, 0, 0, 0, 0) }, .F.) as json
+    local jHigh := tdash.fat.u_resultSum({ newRow("20261001", "sale", 1000, 600, 85, 0, 0, 0, 0, 0) }, .F.) as json
+
+    tlpp.probat.assertEquals(jLow["uncostedPct"], 2)
+    tlpp.probat.assertEquals(jLow["costIncomplete"], .F.)
+    tlpp.probat.assertEquals(jHigh["uncostedPct"], 8.5)
+    tlpp.probat.assertEquals(jHigh["costIncomplete"], .T.)
+Return .T.
+
+Method resultMonths_GroupsByMonth() as Logical Class test_tdash_fat_result
+    local aMonths := tdash.fat.u_resultMonths({;
+        newRow("20261003", "sale", 500, 300, 0, 0, 0, 0, 0, 0),;
+        newRow("20260915", "sale", 200, 100, 0, 0, 0, 0, 0, 0),;
+        newRow("20261020", "sale", 500, 300, 0, 0, 0, 0, 0, 0) }, .F.) as array
+
+    tlpp.probat.assertEquals(Len(aMonths), 2)
+    tlpp.probat.assertEquals(aMonths[1]["month"], "2026-09")
+    tlpp.probat.assertEquals(aMonths[1]["gross"], 100)
+    tlpp.probat.assertEquals(aMonths[2]["month"], "2026-10")
+    tlpp.probat.assertEquals(aMonths[2]["gross"], 400)
+    tlpp.probat.assertEquals(tdash.fat.u_monthLabel("2026-10"), "10/2026")
+Return .T.
+
+Method taxItems_MarksOutOfTotal() as Logical Class test_tdash_fat_result
+    local jSum   := tdash.fat.u_resultSum({ newRow("20261001", "sale", 1000, 600, 0, 120, 16.5, 76, 9, 1) }, .F.) as json
+    local aItems := tdash.fat.u_taxItems(jSum, .F.) as array
+
+    tlpp.probat.assertEquals(Len(aItems), 5)
+    tlpp.probat.assertEquals(aItems[1]["label"], "ICMS")
+    tlpp.probat.assertEquals(aItems[2]["label"], "PIS")
+    tlpp.probat.assertEquals(aItems[4]["label"], "CBS (fora do total)")
+    tlpp.probat.assertEquals(aItems[5]["value"], 1)
+
+    aItems := tdash.fat.u_taxItems(jSum, .T.)
+    tlpp.probat.assertEquals(aItems[2]["label"], "PIS (fora do total)")
+    tlpp.probat.assertEquals(aItems[4]["label"], "CBS")
+Return .T.
+
+Method isTaxRegime_Values() as Logical Class test_tdash_fat_result
+    tlpp.probat.assertEquals(tdash.fat.u_isTaxRegime(""), .T.)
+    tlpp.probat.assertEquals(tdash.fat.u_isTaxRegime("current"), .T.)
+    tlpp.probat.assertEquals(tdash.fat.u_isTaxRegime("REFORM"), .T.)
+    tlpp.probat.assertEquals(tdash.fat.u_isTaxRegime("x"), .F.)
+    tlpp.probat.assertEquals(tdash.fat.u_isReformRegime("reform"), .T.)
+    tlpp.probat.assertEquals(tdash.fat.u_isReformRegime(""), .F.)
+Return .T.

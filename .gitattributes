@@ -1,0 +1,5 @@
+# Fontes TLPP/AdvPL: o compilador do Protheus só aceita Windows-1252.
+# No repositório ficam em UTF-8 (diff legível no GitHub); no checkout o Git converte para CP1252 + CRLF.
+*.tlpp text eol=crlf working-tree-encoding=CP1252
+*.prw  text eol=crlf working-tree-encoding=CP1252
+*.th   text eol=crlf working-tree-encoding=CP1252

@@ -1,0 +1,253 @@
+#include 'tlpp-core.th'
+#include 'totvs.ch'
+
+namespace tdash.core
+
+/*/{Protheus.doc} tdash.core.indicators
+Funções comuns às APIs de módulo: catálogo de indicadores e montagem dos JSON de resposta
+(cartão, ponto de série, item de composição, coluna de lista).
+
+Formato de cada linha do catálogo de um módulo:
+{ id, { tipos }, título, unidade, sentido, ttl }
+tipos: "kpi", "series", "breakdown", "list"; unidade: BRL, QTY, PCT, DAYS, COUNT;
+sentido: up_is_good, down_is_good, neutral.
+@type function
+@author TDash
+@since 20/10/2026
+/*/
+
+/*/{Protheus.doc} u_findIndicator
+Procura o indicador no catálogo e confere se aceita o tipo pedido.
+@type user function
+@author TDash
+@since 20/10/2026
+@param aCatalog, array, catálogo do módulo
+@param cId, character, id do indicador
+@param cKind, character, kpi | series | breakdown | list
+@return array, definição do indicador ou vazio
+/*/
+User Function findIndicator(aCatalog as array, cId as character, cKind as character) as array
+    local aDef := {} as array
+    local nPos := 0 as numeric
+
+    nPos := AScan(aCatalog, {|x| x[1] == AllTrim(cId)})
+    if nPos > 0 .and. AScan(aCatalog[nPos][2], {|k| k == cKind}) > 0
+        aDef := aCatalog[nPos]
+    endIf
+return aDef
+
+/*/{Protheus.doc} u_catalogItems
+Catálogo no formato da rota /catalog.
+@type user function
+@author TDash
+@since 20/10/2026
+@param aCatalog, array, catálogo do módulo
+@return array, itens json { id, kinds, title, unit, direction, ttl }
+/*/
+User Function catalogItems(aCatalog as array) as array
+    local aItems := {} as array
+    local jItem  as json
+    local nX     := 0 as numeric
+
+    for nX := 1 to Len(aCatalog)
+        jItem := jsonObject():new()
+        jItem["id"]        := aCatalog[nX][1]
+        jItem["kinds"]     := aCatalog[nX][2]
+        jItem["title"]     := aCatalog[nX][3]
+        jItem["unit"]      := aCatalog[nX][4]
+        jItem["direction"] := aCatalog[nX][5]
+        jItem["ttl"]       := aCatalog[nX][6]
+        aAdd(aItems, jItem)
+    next nX
+return aItems
+
+/*/{Protheus.doc} u_kpiItem
+Cartão de KPI. Com nPrevious informado (lCompare = .T.), monta a comparação e a variação %.
+@type user function
+@author TDash
+@since 20/10/2026
+@param aDef, array, definição do catálogo
+@param nValue, numeric, valor do período
+@param lCompare, logical, se há comparação
+@param cMode, character, prev | yoy
+@param nPrevious, numeric, valor do período de comparação
+@param cTimestamp, character, data/hora da geração
+@return json, cartão
+/*/
+User Function kpiItem(aDef as array, nValue as numeric, lCompare as logical, cMode as character, nPrevious as numeric, cTimestamp as character) as json
+    local jItem    := jsonObject():new() as json
+    local jCompare as json
+
+    jItem["id"]          := aDef[1]
+    jItem["title"]       := aDef[3]
+    jItem["unit"]        := aDef[4]
+    jItem["direction"]   := aDef[5]
+    jItem["value"]       := Round(nValue, 2)
+    jItem["generatedAt"] := cTimestamp
+    jItem["ttl"]         := aDef[6]
+    jItem["compare"]     := Nil
+
+    if lCompare
+        jCompare := jsonObject():new()
+        jCompare["mode"]  := cMode
+        jCompare["value"] := Round(nPrevious, 2)
+        if nPrevious <> 0
+            jCompare["deltaPct"] := Round(((nValue - nPrevious) / Abs(nPrevious)) * 100, 2)
+        else
+            jCompare["deltaPct"] := Nil
+        endIf
+        jItem["compare"] := jCompare
+    endIf
+return jItem
+
+/*/{Protheus.doc} u_jsonItem
+Item de composição { key, label, value }.
+@type user function
+@author TDash
+@since 20/10/2026
+@param cKey, character, chave
+@param cLabel, character, rótulo
+@param nValue, numeric, valor
+@return json, item
+/*/
+User Function jsonItem(cKey as character, cLabel as character, nValue as numeric) as json
+    local jItem := jsonObject():new() as json
+
+    jItem["key"]   := AllTrim(cKey)
+    jItem["label"] := AllTrim(cLabel)
+    jItem["value"] := Round(nValue, 2)
+return jItem
+
+/*/{Protheus.doc} u_jsonPoint
+Ponto de série { x, y, s }.
+@type user function
+@author TDash
+@since 20/10/2026
+@param cX, character, chave do eixo x
+@param nY, numeric, valor
+@param cSeries, character, nome da série
+@return json, ponto
+/*/
+User Function jsonPoint(cX as character, nY as numeric, cSeries as character) as json
+    local jPoint := jsonObject():new() as json
+
+    jPoint["x"] := cX
+    jPoint["y"] := Round(nY, 2)
+    jPoint["s"] := cSeries
+return jPoint
+
+/*/{Protheus.doc} u_jsonColumn
+Coluna de lista { key, label, type }.
+@type user function
+@author TDash
+@since 20/10/2026
+@param cKey, character, chave do campo no item
+@param cLabel, character, rótulo
+@param cType, character, text | date | BRL | QTY | DAYS | COUNT
+@return json, coluna
+/*/
+User Function jsonColumn(cKey as character, cLabel as character, cType as character) as json
+    local jColumn := jsonObject():new() as json
+
+    jColumn["key"]   := cKey
+    jColumn["label"] := cLabel
+    jColumn["type"]  := cType
+return jColumn
+
+/*/{Protheus.doc} u_topWithOthers
+Remove itens com valor zero, ordena pelo valor absoluto (maior primeiro), mantém os nTop
+primeiros e soma o restante num item "Outros".
+@type user function
+@author TDash
+@since 20/10/2026
+@param aItems, array, itens json { key, label, value }
+@param nTop, numeric, quantidade a manter
+@param cOthersLabel, character, rótulo do agrupamento (ex.: Outras contas)
+@return array, itens resultantes
+/*/
+User Function topWithOthers(aItems as array, nTop as numeric, cOthersLabel as character) as array
+    local aResult := {} as array
+    local aSorted := {} as array
+    local nOthers := 0 as numeric
+    local nCount  := 0 as numeric
+    local nX      := 0 as numeric
+
+    for nX := 1 to Len(aItems)
+        if aItems[nX]["value"] <> 0
+            aAdd(aSorted, aItems[nX])
+        endIf
+    next nX
+    aSort(aSorted, , , {|a, b| Abs(a["value"]) > Abs(b["value"])})
+
+    for nX := 1 to Len(aSorted)
+        if nX <= nTop
+            aAdd(aResult, aSorted[nX])
+        else
+            nOthers += aSorted[nX]["value"]
+            nCount++
+        endIf
+    next nX
+
+    if nCount > 0
+        aAdd(aResult, u_jsonItem("others", cOthersLabel + " (" + cValToChar(nCount) + ")", nOthers))
+    endIf
+return aResult
+
+/*/{Protheus.doc} u_applyShares
+Preenche "share" (participação no total, pelo valor absoluto) em cada item.
+@type user function
+@author TDash
+@since 20/10/2026
+@param aItems, array, itens json com "value"
+@return array, os mesmos itens com "share"
+/*/
+User Function applyShares(aItems as array) as array
+    local nTotal := 0 as numeric
+    local nX     := 0 as numeric
+
+    for nX := 1 to Len(aItems)
+        nTotal += Abs(aItems[nX]["value"])
+    next nX
+    for nX := 1 to Len(aItems)
+        if nTotal > 0
+            aItems[nX]["share"] := Round(Abs(aItems[nX]["value"]) / nTotal, 4)
+        else
+            aItems[nX]["share"] := 0
+        endIf
+    next nX
+return aItems
+
+/*/{Protheus.doc} u_sumColumn
+Soma uma coluna numérica de um array de linhas.
+@type user function
+@author TDash
+@since 20/10/2026
+@param aRows, array, linhas
+@param nColumn, numeric, coluna
+@return numeric, soma
+/*/
+User Function sumColumn(aRows as array, nColumn as numeric) as numeric
+    local nTotal := 0 as numeric
+    local nX     := 0 as numeric
+
+    for nX := 1 to Len(aRows)
+        nTotal += aRows[nX][nColumn]
+    next nX
+return nTotal
+
+/*/{Protheus.doc} u_rowsToItems
+Converte linhas { chave, rótulo, valor } em itens de composição.
+@type user function
+@author TDash
+@since 20/10/2026
+@param aRows, array, linhas
+@return array, itens json
+/*/
+User Function rowsToItems(aRows as array) as array
+    local aItems := {} as array
+    local nX     := 0 as numeric
+
+    for nX := 1 to Len(aRows)
+        aAdd(aItems, u_jsonItem(aRows[nX][1], aRows[nX][2], aRows[nX][3]))
+    next nX
+return aItems

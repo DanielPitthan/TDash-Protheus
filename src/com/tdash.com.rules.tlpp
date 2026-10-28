@@ -1,0 +1,23 @@
+#include 'tlpp-core.th'
+#include 'totvs.ch'
+
+namespace tdash.com
+
+/*/{Protheus.doc} u_brlFactor
+Fator que leva um valor de pedido de compra para reais. Pedido em moeda estrangeira (C7_MOEDA maior que 1) grava
+o preço na moeda do pedido e a taxa em C7_TXMOEDA; pedido em reais (moeda 1), ou sem taxa preenchida, não muda.
+A consulta SQL de TDashComRepository:brlFactor aplica a mesma regra.
+@type user function
+@author TDash
+@since 25/10/2026
+@param nMoeda, numeric, C7_MOEDA
+@param nTaxa, numeric, C7_TXMOEDA
+@return numeric, fator (multiplique o valor na moeda do pedido por ele)
+/*/
+User Function brlFactor(nMoeda as numeric, nTaxa as numeric) as numeric
+    local nFactor := 1 as numeric
+
+    if nMoeda > 1 .and. nTaxa > 0
+        nFactor := nTaxa
+    endIf
+return nFactor

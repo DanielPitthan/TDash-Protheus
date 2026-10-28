@@ -1,0 +1,100 @@
+#include 'tlpp-core.th'
+#include 'totvs.ch'
+
+namespace tdash.core
+
+/*/{Protheus.doc} u_bucketKey
+Chave do ponto da série conforme a granularidade.
+day: AAAA-MM-DD; week: segunda-feira da semana (AAAA-MM-DD); month: AAAA-MM.
+@type user function
+@author TDash
+@since 20/10/2026
+@param cDate, character, data AAAAMMDD
+@param cGrain, character, day | week | month
+@return character, chave
+/*/
+User Function bucketKey(cDate as character, cGrain as character) as character
+    local dDate := SToD(cDate) as date
+    local cKey  := "" as character
+
+    if cGrain == "month"
+        cKey := Left(cDate, 4) + "-" + SubStr(cDate, 5, 2)
+    elseIf cGrain == "week"
+        // Dow: 1 = domingo ... 7 = sábado; volta até a segunda-feira
+        dDate := dDate - Mod(Dow(dDate) + 5, 7)
+        cKey  := Transform(DToS(dDate), "@R 9999-99-99")
+    else
+        cKey := Transform(cDate, "@R 9999-99-99")
+    endIf
+return cKey
+
+/*/{Protheus.doc} u_groupRows
+Agrupa linhas { data AAAAMMDD, valor } pela chave da granularidade.
+@type user function
+@author TDash
+@since 20/10/2026
+@param aRows, array, linhas
+@param cGrain, character, day | week | month
+@return array, { { chave, valor }, ... } ordenado pela chave
+/*/
+User Function groupRows(aRows as array, cGrain as character) as array
+    local aGroups := {} as array
+    local cKey    := "" as character
+    local nPos    := 0 as numeric
+    local nX      := 0 as numeric
+
+    for nX := 1 to Len(aRows)
+        cKey := u_bucketKey(aRows[nX][1], cGrain)
+        nPos := AScan(aGroups, {|x| x[1] == cKey})
+        if nPos == 0
+            aAdd(aGroups, { cKey, 0 })
+            nPos := Len(aGroups)
+        endIf
+        aGroups[nPos][2] += aRows[nX][2]
+    next nX
+
+    aSort(aGroups, , , {|a, b| a[1] < b[1]})
+return aGroups
+
+/*/{Protheus.doc} u_mergeKeys
+União ordenada das chaves de dois agrupamentos.
+@type user function
+@author TDash
+@since 20/10/2026
+@param aFirst, array, agrupamento 1
+@param aSecond, array, agrupamento 2
+@return array, chaves
+/*/
+User Function mergeKeys(aFirst as array, aSecond as array) as array
+    local aKeys := {} as array
+    local nX    := 0 as numeric
+
+    for nX := 1 to Len(aFirst)
+        aAdd(aKeys, aFirst[nX][1])
+    next nX
+    for nX := 1 to Len(aSecond)
+        if AScan(aKeys, {|k| k == aSecond[nX][1]}) == 0
+            aAdd(aKeys, aSecond[nX][1])
+        endIf
+    next nX
+
+    aSort(aKeys)
+return aKeys
+
+/*/{Protheus.doc} u_valueOf
+Valor de uma chave num agrupamento (0 quando não existe).
+@type user function
+@author TDash
+@since 20/10/2026
+@param aGroups, array, agrupamento { chave, valor }
+@param cKey, character, chave
+@return numeric, valor
+/*/
+User Function valueOf(aGroups as array, cKey as character) as numeric
+    local nPos   := AScan(aGroups, {|x| x[1] == cKey}) as numeric
+    local nValue := 0 as numeric
+
+    if nPos > 0
+        nValue := aGroups[nPos][2]
+    endIf
+return nValue

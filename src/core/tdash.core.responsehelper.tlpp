@@ -1,0 +1,132 @@
+#include 'tlpp-core.th'
+#include 'tlpp-rest.th'
+#include 'totvs.ch'
+
+namespace tdash.core
+
+/*/{Protheus.doc} TDashResponseHelper
+Monta as respostas JSON das APIs TDash: corpo de sucesso, erro no modelo TOTVS
+{ code, message, detailedMessage, helpUrl } e cabeçalhos de cache.
+@type class
+@author TDash
+@since 20/10/2026
+@version 1.0
+/*/
+class TDashResponseHelper
+    public method new()
+    public method getResponse(jBody as json) as character
+    public method getErrorResponse(cCode as character, cMessage as character, cDetail as character) as character
+    public method setCacheHeaders(nTtl as numeric)
+    public method timestamp() as character
+    public method badRequest(cMessage as character)
+    public method notFound(cId as character, cModule as character)
+    public method serverError(cContext as character, cDetail as character)
+endclass
+
+/*/{Protheus.doc} new
+Construtor.
+@type method
+@author TDash
+@since 20/10/2026
+/*/
+method new() class TDashResponseHelper
+return self
+
+/*/{Protheus.doc} getResponse
+Serializa o corpo de sucesso em UTF-8.
+@type method
+@author TDash
+@since 20/10/2026
+@param jBody, json, corpo da resposta
+@return character, JSON em UTF-8
+/*/
+method getResponse(jBody as json) as character class TDashResponseHelper
+    oRest:setKeyHeaderResponse("Content-Type", "application/json; charset=utf-8")
+return EncodeUTF8(jBody:toJson())
+
+/*/{Protheus.doc} getErrorResponse
+Monta o corpo de erro no modelo TOTVS.
+@type method
+@author TDash
+@since 20/10/2026
+@param cCode, character, código do erro (ex.: TDASH-400-PARAM)
+@param cMessage, character, mensagem para o usuário
+@param cDetail, character, detalhe (sem SQL nem dado sensível)
+@return character, JSON em UTF-8
+/*/
+method getErrorResponse(cCode as character, cMessage as character, cDetail as character) as character class TDashResponseHelper
+    local jError := jsonObject():new() as json
+
+    jError["code"]            := cCode
+    jError["message"]         := cMessage
+    jError["detailedMessage"] := cDetail
+    jError["helpUrl"]         := ""
+
+    oRest:setKeyHeaderResponse("Content-Type", "application/json; charset=utf-8")
+    oRest:setKeyHeaderResponse("Cache-Control", "no-store")
+return EncodeUTF8(jError:toJson())
+
+/*/{Protheus.doc} setCacheHeaders
+Define o Cache-Control da resposta. O app usa o campo "ttl" do corpo; o header serve a outros consumidores.
+@type method
+@author TDash
+@since 20/10/2026
+@param nTtl, numeric, segundos de validade (0 = sem cache)
+/*/
+method setCacheHeaders(nTtl as numeric) class TDashResponseHelper
+    if nTtl > 0
+        oRest:setKeyHeaderResponse("Cache-Control", "private, max-age=" + cValToChar(nTtl))
+    else
+        oRest:setKeyHeaderResponse("Cache-Control", "no-store")
+    endIf
+return
+
+/*/{Protheus.doc} timestamp
+Data e hora do servidor no formato ISO 8601 (sem fuso), para o campo generatedAt.
+@type method
+@author TDash
+@since 20/10/2026
+@return character, ex.: 2026-10-20T14:32:05
+/*/
+method timestamp() as character class TDashResponseHelper
+return Transform(DToS(Date()), "@R 9999-99-99") + "T" + Time()
+
+/*/{Protheus.doc} badRequest
+Responde 400 (parâmetro inválido).
+@type method
+@author TDash
+@since 20/10/2026
+@param cMessage, character, o que está errado
+/*/
+method badRequest(cMessage as character) class TDashResponseHelper
+    oRest:setStatusCode(400)
+    oRest:setResponse(::getErrorResponse("TDASH-400-PARAM", cMessage, "Verifique os parâmetros da requisição."))
+return
+
+/*/{Protheus.doc} notFound
+Responde 404 (indicador fora do catálogo do módulo).
+@type method
+@author TDash
+@since 20/10/2026
+@param cId, character, id pedido
+@param cModule, character, rota do módulo (ex.: fin)
+/*/
+method notFound(cId as character, cModule as character) class TDashResponseHelper
+    oRest:setStatusCode(404)
+    oRest:setResponse(::getErrorResponse("TDASH-404-INDICATOR", "Indicador não encontrado: " + cId, "Consulte /tdash/v1/" + cModule + "/catalog."))
+return
+
+/*/{Protheus.doc} serverError
+Registra o erro no log do AppServer e responde 500 sem expor detalhes técnicos.
+@type method
+@author TDash
+@since 20/10/2026
+@param cContext, character, classe:rota (para o log)
+@param cDetail, character, descrição do erro (só no log)
+/*/
+method serverError(cContext as character, cDetail as character) class TDashResponseHelper
+    FWLogMsg("ERROR", , "TDASH", cContext, , "01", cDetail, 0, 0, {})
+    ConOut("[TDASH] ERRO 500 em " + cContext + ": " + cDetail)
+    oRest:setStatusCode(500)
+    oRest:setResponse(::getErrorResponse("TDASH-500", "Erro ao consultar o Protheus.", "Entre em contato com o administrador do sistema."))
+return

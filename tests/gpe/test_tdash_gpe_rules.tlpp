@@ -1,0 +1,171 @@
+#include "tlpp-core.th"
+#include "tlpp-probat.th"
+
+namespace tests.gpe
+
+/*/{Protheus.doc} test_tdash_gpe_rules
+Testes PROBAT das regras do RH (sem banco): agrupamento da LGPD, faixas, dias de ausência e competências da folha.
+Execução: appserver.exe -console -consolelog -run=tlpp.probat.run -env={AMBIENTE}
+@type class
+@author TDash
+@since 21/10/2026
+/*/
+@TestFixture()
+Class test_tdash_gpe_rules
+    Public Method New() as Object
+
+    @Test('lgpdGroups: grupos com menos pessoas que o mínimo vão para Outros')
+    Public Method lgpdGroups_SmallGroups_GoToOthers() as Logical
+
+    @Test('lgpdGroups: Outros abaixo do mínimo absorve o menor grupo restante')
+    Public Method lgpdGroups_SmallOthers_AbsorbsSmallestGroup() as Logical
+
+    @Test('lgpdGroups: total abaixo do mínimo não devolve nada')
+    Public Method lgpdGroups_TotalBelowMinimum_ReturnsEmpty() as Logical
+
+    @Test('lgpdGroups: top mantém os maiores e soma o restante em Outros')
+    Public Method lgpdGroups_Top_KeepsLargestGroups() as Logical
+
+    @Test('lgpdGroups: sem top mantém a ordem de entrada')
+    Public Method lgpdGroups_NoTop_KeepsInputOrder() as Logical
+
+    @Test('ageBand: faixa muda só depois do aniversário')
+    Public Method ageBand_Boundaries_UseCompletedYears() as Logical
+
+    @Test('tenureBand: menos de 1 ano, 1 a 2, 6 a 10 e mais de 10')
+    Public Method tenureBand_Boundaries() as Logical
+
+    @Test('absenceDays: interseção da ausência com o período, em dias corridos')
+    Public Method absenceDays_Intersection() as Logical
+
+    @Test('monthShift: atravessa a virada do ano nos dois sentidos')
+    Public Method monthShift_CrossesYear() as Logical
+
+    @Test('payrollMonths: mês em aberto usa a última competência fechada e compara com a anterior')
+    Public Method payrollMonths_OpenMonth_UsesLastClosed() as Logical
+
+    @Test('payrollMonths: período maior que a folha fechada termina na última competência')
+    Public Method payrollMonths_RangePastLastClosed_IsCapped() as Logical
+
+    @Test('payrollMonths: ano anterior com os mesmos meses')
+    Public Method payrollMonths_YearOverYear() as Logical
+
+    @Test('monthLabel: um mês e intervalo')
+    Public Method monthLabel_OneMonthAndRange() as Logical
+EndClass
+
+Method New() as Object Class test_tdash_gpe_rules
+Return Self
+
+Static Function group(cKey as Character, nValue as Numeric, nPeople as Numeric) as Array
+Return { cKey, "Grupo " + cKey, nValue, nPeople }
+
+Static Function keys(aResult as Array) as Character
+    Local cKeys := "" as Character
+    Local nX    := 0 as Numeric
+
+    For nX := 1 To Len(aResult)
+        If nX > 1
+            cKeys += ","
+        EndIf
+        cKeys += aResult[nX][1]
+    Next nX
+Return cKeys
+
+Method lgpdGroups_SmallGroups_GoToOthers() as Logical Class test_tdash_gpe_rules
+    Local aResult := tdash.gpe.u_lgpdGroups({ group("A", 30, 30), group("B", 3, 3), group("C", 4, 4), group("D", 10, 10) }, 5, 0) as Array
+
+    tlpp.probat.assertEquals(keys(aResult), "A,D,others")
+    tlpp.probat.assertEquals(aResult[3][3], 7)
+    tlpp.probat.assertEquals(aResult[3][2], "Outros (2)")
+Return .T.
+
+Method lgpdGroups_SmallOthers_AbsorbsSmallestGroup() as Logical Class test_tdash_gpe_rules
+    // B (2 pessoas) sozinho em Outros revelaria um grupo pequeno: entra o menor restante (D, 6 pessoas)
+    Local aResult := tdash.gpe.u_lgpdGroups({ group("A", 30, 30), group("B", 2, 2), group("D", 6, 6) }, 5, 0) as Array
+
+    tlpp.probat.assertEquals(keys(aResult), "A,others")
+    tlpp.probat.assertEquals(aResult[2][3], 8)
+Return .T.
+
+Method lgpdGroups_TotalBelowMinimum_ReturnsEmpty() as Logical Class test_tdash_gpe_rules
+    Local aResult := tdash.gpe.u_lgpdGroups({ group("A", 1000, 2), group("B", 900, 2) }, 5, 0) as Array
+
+    tlpp.probat.assertEquals(Len(aResult), 0)
+Return .T.
+
+Method lgpdGroups_Top_KeepsLargestGroups() as Logical Class test_tdash_gpe_rules
+    Local aResult := tdash.gpe.u_lgpdGroups({ group("A", 10, 10), group("B", 50, 50), group("C", 20, 20), group("D", 8, 8) }, 5, 2) as Array
+
+    tlpp.probat.assertEquals(keys(aResult), "B,C,others")
+    tlpp.probat.assertEquals(aResult[3][3], 18)
+Return .T.
+
+Method lgpdGroups_NoTop_KeepsInputOrder() as Logical Class test_tdash_gpe_rules
+    Local aResult := tdash.gpe.u_lgpdGroups({ group("1", 6, 6), group("2", 40, 40), group("3", 12, 12) }, 5, 0) as Array
+
+    tlpp.probat.assertEquals(keys(aResult), "1,2,3")
+Return .T.
+
+Method ageBand_Boundaries_UseCompletedYears() as Logical Class test_tdash_gpe_rules
+    // Nascido em 22/10/2001: em 21/10/2026 tem 24 anos; em 22/10/2026, 25
+    tlpp.probat.assertEquals(tdash.gpe.u_ageBand(SToD("20011022"), SToD("20261021"))[1], "1")
+    tlpp.probat.assertEquals(tdash.gpe.u_ageBand(SToD("20011022"), SToD("20261022"))[1], "2")
+    tlpp.probat.assertEquals(tdash.gpe.u_ageBand(SToD("19700101"), SToD("20261021"))[1], "5")
+    tlpp.probat.assertEquals(tdash.gpe.u_ageBand(CToD(""), SToD("20261021"))[1], "9")
+Return .T.
+
+Method tenureBand_Boundaries() as Logical Class test_tdash_gpe_rules
+    tlpp.probat.assertEquals(tdash.gpe.u_tenureBand(SToD("20260101"), SToD("20261021"))[1], "1")
+    tlpp.probat.assertEquals(tdash.gpe.u_tenureBand(SToD("20251021"), SToD("20261021"))[1], "2")
+    tlpp.probat.assertEquals(tdash.gpe.u_tenureBand(SToD("20161021"), SToD("20261021"))[1], "4")
+    tlpp.probat.assertEquals(tdash.gpe.u_tenureBand(SToD("20151020"), SToD("20261021"))[1], "5")
+Return .T.
+
+Method absenceDays_Intersection() as Logical Class test_tdash_gpe_rules
+    Local dFrom := SToD("20261001") as Date
+    Local dTo   := SToD("20261031") as Date
+
+    tlpp.probat.assertEquals(tdash.gpe.u_absenceDays(SToD("20261005"), SToD("20261009"), dFrom, dTo), 5)
+    tlpp.probat.assertEquals(tdash.gpe.u_absenceDays(SToD("20260920"), SToD("20261003"), dFrom, dTo), 3)
+    tlpp.probat.assertEquals(tdash.gpe.u_absenceDays(SToD("20261025"), CToD(""), dFrom, dTo), 7)
+    tlpp.probat.assertEquals(tdash.gpe.u_absenceDays(SToD("20260901"), SToD("20260915"), dFrom, dTo), 0)
+Return .T.
+
+Method monthShift_CrossesYear() as Logical Class test_tdash_gpe_rules
+    tlpp.probat.assertEquals(tdash.gpe.u_monthShift("202601", -1), "202512")
+    tlpp.probat.assertEquals(tdash.gpe.u_monthShift("202611", 3), "202702")
+    tlpp.probat.assertEquals(tdash.gpe.u_monthShift("202610", -12), "202510")
+Return .T.
+
+Method payrollMonths_OpenMonth_UsesLastClosed() as Logical Class test_tdash_gpe_rules
+    Local aMonths := tdash.gpe.u_payrollMonths("202610", "202610", "202609", "prev") as Array
+
+    tlpp.probat.assertEquals(aMonths[1], "202609")
+    tlpp.probat.assertEquals(aMonths[2], "202609")
+    tlpp.probat.assertEquals(aMonths[3], "202608")
+    tlpp.probat.assertEquals(aMonths[4], "202608")
+    tlpp.probat.assertEquals(aMonths[5], .T.)
+Return .T.
+
+Method payrollMonths_RangePastLastClosed_IsCapped() as Logical Class test_tdash_gpe_rules
+    Local aMonths := tdash.gpe.u_payrollMonths("202607", "202610", "202609", "prev") as Array
+
+    tlpp.probat.assertEquals(aMonths[1], "202607")
+    tlpp.probat.assertEquals(aMonths[2], "202609")
+    tlpp.probat.assertEquals(aMonths[3], "202604")
+    tlpp.probat.assertEquals(aMonths[4], "202606")
+Return .T.
+
+Method payrollMonths_YearOverYear() as Logical Class test_tdash_gpe_rules
+    Local aMonths := tdash.gpe.u_payrollMonths("202607", "202609", "202609", "yoy") as Array
+
+    tlpp.probat.assertEquals(aMonths[3], "202507")
+    tlpp.probat.assertEquals(aMonths[4], "202509")
+    tlpp.probat.assertEquals(aMonths[5], .F.)
+Return .T.
+
+Method monthLabel_OneMonthAndRange() as Logical Class test_tdash_gpe_rules
+    tlpp.probat.assertEquals(tdash.gpe.u_monthLabel("202609", "202609"), "set/2026")
+    tlpp.probat.assertEquals(tdash.gpe.u_monthLabel("202607", "202609"), "jul/2026 a set/2026")
+Return .T.

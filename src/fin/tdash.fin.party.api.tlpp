@@ -1,0 +1,614 @@
+#include 'tlpp-core.th'
+#include 'totvs.ch'
+
+// Validade das respostas (segundos): operacional, tático, estratégico
+#define TTL_OP  300
+#define TTL_TAT 1800
+#define TTL_EST 43200
+
+#define DEFAULT_PAGE_SIZE 20
+#define SEARCH_MAX        20
+
+/*/{Protheus.doc} TDashFinParty
+Posição financeira de um cliente ou fornecedor (como as consultas padrão FINC010 e FINC030).
+Atende os indicadores "fin.party_*" das rotas do Financeiro (TDashFinApi repassa para cá):
+- kpis, series/:id, breakdown/:id e list/:id com type=customer|supplier, code=<código> e store=<loja> (opcional;
+  sem loja, junta todas as lojas do código);
+- list/fin.party_search com type e search=<texto> (3 a 40 caracteres) para escolher o cliente ou fornecedor.
+Formato das respostas: docs/02-contrato-de-resposta.md. Regras: docs/10-catalogo-de-indicadores.md.
+@type class
+@author TDash
+@since 22/10/2026
+@version 1.0
+/*/
+namespace tdash.fin
+
+class TDashFinParty
+    private data cType  as character
+    private data cCode  as character
+    private data cStore as character
+
+    public method new()
+    public method kpis(aIds as array, oRequest as object, oHelper as object) as logical
+    public method series(cId as character, oRequest as object, oHelper as object) as logical
+    public method breakdown(cId as character, oRequest as object, oHelper as object) as logical
+    public method list(cId as character, oRequest as object, oHelper as object) as logical
+
+    private method readParty(oRequest as object, oHelper as object) as logical
+    private method kpiValue(cId as character, dFrom as date, dTo as date, dToday as date) as numeric
+    private method creditMode() as character
+    private method searchPage(oRequest as object, oHelper as object, aDef as array) as logical
+endclass
+
+method new() class TDashFinParty
+    ::cType  := ""
+    ::cCode  := ""
+    ::cStore := ""
+return self
+
+/*/{Protheus.doc} kpis
+Cartões da posição: em aberto, vencido e a vencer (posição de hoje), limite e crédito disponível (só clientes) e
+recebido/pago no período (aceita comparação).
+@type method
+@author TDash
+@since 22/10/2026
+@param aIds, array, ids pedidos (todos fin.party_*)
+@param oRequest, object, TDashRequest
+@param oHelper, object, TDashResponseHelper
+@return logical, sempre .T.
+/*/
+method kpis(aIds as array, oRequest as object, oHelper as object) as logical class TDashFinParty
+    local oPeriod  := tdash.core.TDashPeriod():new() as object
+    local jBody    := jsonObject():new() as json
+    local aItems   := {} as array
+    local aDef     := {} as array
+    local dToday   := Date() as date
+    local lCompare := .F. as logical
+    local nTtl     := TTL_EST as numeric
+    local nValue   := 0 as numeric
+    local nPrev    := 0 as numeric
+    local nX       := 0 as numeric
+
+    if !::readParty(oRequest, oHelper)
+        return .T.
+    endIf
+
+    if !oPeriod:fromQuery(oRequest:query("dateFrom"), oRequest:query("dateTo"), oRequest:query("compare"), dToday)
+        oHelper:badRequest(oPeriod:cError)
+        return .T.
+    endIf
+
+    for nX := 1 to Len(aIds)
+        aDef := tdash.core.u_findIndicator(partyCatalog(), aIds[nX], "kpi")
+        if Len(aDef) == 0
+            oHelper:notFound(AllTrim(aIds[nX]), "fin")
+            return .T.
+        endIf
+        if ::cType == "supplier" .and. "credit" $ aDef[1]
+            oHelper:badRequest("Limite e crédito disponível só existem para clientes.")
+            return .T.
+        endIf
+    next nX
+
+    TRY
+        for nX := 1 to Len(aIds)
+            aDef     := tdash.core.u_findIndicator(partyCatalog(), aIds[nX], "kpi")
+            nValue   := ::kpiValue(aDef[1], oPeriod:dFrom, oPeriod:dTo, dToday)
+            lCompare := oPeriod:hasCompare() .and. aDef[1] == "fin.party_settled"
+            nPrev    := 0
+            if lCompare
+                nPrev := ::kpiValue(aDef[1], oPeriod:compareFrom(), oPeriod:compareTo(), dToday)
+            endIf
+
+            aAdd(aItems, tdash.core.u_kpiItem(aDef, nValue, lCompare, oPeriod:cCompare, nPrev, oHelper:timestamp()))
+            nTtl := Min(nTtl, aDef[6])
+        next nX
+
+        jBody["items"] := aItems
+        oHelper:setCacheHeaders(nTtl)
+        oRest:setResponse(oHelper:getResponse(jBody))
+    CATCH oError
+        oHelper:serverError("TDashFinParty:kpis", oError:description)
+    ENDTRY
+return .T.
+
+/*/{Protheus.doc} series
+fin.party_settled: série "settled", recebido do cliente (ou pago ao fornecedor) por dia, semana ou mês.
+@type method
+@author TDash
+@since 22/10/2026
+@param cId, character, id do indicador
+@param oRequest, object, TDashRequest
+@param oHelper, object, TDashResponseHelper
+@return logical, sempre .T.
+/*/
+method series(cId as character, oRequest as object, oHelper as object) as logical class TDashFinParty
+    local oPeriod := tdash.core.TDashPeriod():new() as object
+    local oRepo   := TDashFinPartyRepository():new() as object
+    local jBody   := jsonObject():new() as json
+    local aDef    := tdash.core.u_findIndicator(partyCatalog(), cId, "series") as array
+    local aRows   := {} as array
+    local aPoints := {} as array
+    local cGrain  := Lower(oRequest:query("grain")) as character
+    local nX      := 0 as numeric
+
+    if Len(aDef) == 0
+        oHelper:notFound(cId, "fin")
+        return .T.
+    endIf
+    if !::readParty(oRequest, oHelper)
+        return .T.
+    endIf
+
+    if Empty(cGrain)
+        cGrain := "month"
+    endIf
+    if AScan({ "day", "week", "month" }, {|x| x == cGrain}) == 0
+        oHelper:badRequest("grain inválido. Use day, week ou month.")
+        return .T.
+    endIf
+
+    if !oPeriod:fromQuery(oRequest:query("dateFrom"), oRequest:query("dateTo"), "none", Date())
+        oHelper:badRequest(oPeriod:cError)
+        return .T.
+    endIf
+
+    TRY
+        aRows := tdash.core.u_groupRows(oRepo:settled(::cType, oPeriod:dFrom, oPeriod:dTo, ::cCode, ::cStore), cGrain)
+        for nX := 1 to Len(aRows)
+            aAdd(aPoints, tdash.core.u_jsonPoint(aRows[nX][1], Round(aRows[nX][2], 2), "settled"))
+        next nX
+
+        jBody["id"]          := aDef[1]
+        jBody["unit"]        := aDef[4]
+        jBody["grain"]       := cGrain
+        jBody["series"]      := { "settled" }
+        jBody["points"]      := aPoints
+        jBody["generatedAt"] := oHelper:timestamp()
+        jBody["ttl"]         := aDef[6]
+
+        oHelper:setCacheHeaders(aDef[6])
+        oRest:setResponse(oHelper:getResponse(jBody))
+    CATCH oError
+        oHelper:serverError("TDashFinParty:series", oError:description)
+    ENDTRY
+return .T.
+
+/*/{Protheus.doc} breakdown
+fin.party_aging: saldo vencido do cliente ou fornecedor por faixa de atraso.
+@type method
+@author TDash
+@since 22/10/2026
+@param cId, character, id do indicador
+@param oRequest, object, TDashRequest
+@param oHelper, object, TDashResponseHelper
+@return logical, sempre .T.
+/*/
+method breakdown(cId as character, oRequest as object, oHelper as object) as logical class TDashFinParty
+    local oRepo := TDashFinPartyRepository():new() as object
+    local jBody := jsonObject():new() as json
+    local aDef  := tdash.core.u_findIndicator(partyCatalog(), cId, "breakdown") as array
+
+    if Len(aDef) == 0
+        oHelper:notFound(cId, "fin")
+        return .T.
+    endIf
+    if !::readParty(oRequest, oHelper)
+        return .T.
+    endIf
+
+    TRY
+        jBody["id"]          := aDef[1]
+        jBody["unit"]        := aDef[4]
+        jBody["items"]       := tdash.core.u_applyShares(tdash.core.u_rowsToItems(oRepo:aging(::cType, Date(), ::cCode, ::cStore)))
+        jBody["generatedAt"] := oHelper:timestamp()
+        jBody["ttl"]         := aDef[6]
+
+        oHelper:setCacheHeaders(aDef[6])
+        oRest:setResponse(oHelper:getResponse(jBody))
+    CATCH oError
+        oHelper:serverError("TDashFinParty:breakdown", oError:description)
+    ENDTRY
+return .T.
+
+/*/{Protheus.doc} list
+fin.party_search: busca de clientes ou fornecedores. fin.party_titles: títulos em aberto, do vencimento mais antigo
+para o mais novo. fin.party_stores: cadastro e histórico por loja, com a linha "Todas as lojas" primeiro quando há
+mais de uma.
+@type method
+@author TDash
+@since 22/10/2026
+@param cId, character, id do indicador
+@param oRequest, object, TDashRequest
+@param oHelper, object, TDashResponseHelper
+@return logical, sempre .T.
+/*/
+method list(cId as character, oRequest as object, oHelper as object) as logical class TDashFinParty
+    local oRepo     := TDashFinPartyRepository():new() as object
+    local jBody     as json
+    local aDef      := tdash.core.u_findIndicator(partyCatalog(), cId, "list") as array
+    local aColumns  := {} as array
+    local aStores   := {} as array
+    local aItems    := {} as array
+    local lClient   := .T. as logical
+    local nPage     := 0 as numeric
+    local nPageSize := 0 as numeric
+    local nX        := 0 as numeric
+
+    if Len(aDef) == 0
+        oHelper:notFound(cId, "fin")
+        return .T.
+    endIf
+    if cId == "fin.party_search"
+        return ::searchPage(oRequest, oHelper, aDef)
+    endIf
+    if !::readParty(oRequest, oHelper)
+        return .T.
+    endIf
+    lClient := ::cType == "customer"
+
+    nPage     := tdash.core.u_parseInt(oRequest:query("page"), 1, 1, 100000)
+    nPageSize := tdash.core.u_parseInt(oRequest:query("pageSize"), DEFAULT_PAGE_SIZE, 1, 100)
+    if nPage < 0 .or. nPageSize < 0
+        oHelper:badRequest("page deve ser maior que zero e pageSize entre 1 e 100.")
+        return .T.
+    endIf
+
+    TRY
+        if cId == "fin.party_titles"
+            aAdd(aColumns, tdash.core.u_jsonColumn("document", "Título", "text"))
+            aAdd(aColumns, tdash.core.u_jsonColumn("party", "Loja", "text"))
+            aAdd(aColumns, tdash.core.u_jsonColumn("issueDate", "Emissão", "date"))
+            aAdd(aColumns, tdash.core.u_jsonColumn("dueDate", "Vencimento", "date"))
+            aAdd(aColumns, tdash.core.u_jsonColumn("value", "Valor", "BRL"))
+            aAdd(aColumns, tdash.core.u_jsonColumn("balance", "Saldo", "BRL"))
+            aAdd(aColumns, tdash.core.u_jsonColumn("daysLate", "Atraso", "DAYS"))
+            jBody := oRepo:titles(::cType, Date(), ::cCode, ::cStore, nPage, nPageSize)
+        else
+            aAdd(aColumns, tdash.core.u_jsonColumn("document", "Loja", "text"))
+            aAdd(aColumns, tdash.core.u_jsonColumn("party", "Nome", "text"))
+            aAdd(aColumns, tdash.core.u_jsonColumn("detail", "Cadastro", "text"))
+            if lClient
+                aAdd(aColumns, tdash.core.u_jsonColumn("creditLimit", "Limite de crédito", "BRL"))
+                aAdd(aColumns, tdash.core.u_jsonColumn("creditDue", "Validade do limite", "date"))
+            endIf
+            aAdd(aColumns, tdash.core.u_jsonColumn("largestPurchase", "Maior compra", "BRL"))
+            aAdd(aColumns, tdash.core.u_jsonColumn("largestBalance", "Maior saldo", "BRL"))
+            aAdd(aColumns, tdash.core.u_jsonColumn("firstPurchase", "Primeira compra", "date"))
+            aAdd(aColumns, tdash.core.u_jsonColumn("lastPurchase", "Última compra", "date"))
+            aAdd(aColumns, tdash.core.u_jsonColumn("purchases", "Compras", "COUNT"))
+            aAdd(aColumns, tdash.core.u_jsonColumn("maxDelay", "Maior atraso", "DAYS"))
+            if lClient
+                aAdd(aColumns, tdash.core.u_jsonColumn("avgDelay", "Média de atraso", "DAYS"))
+            endIf
+
+            aStores := oRepo:stores(::cType, ::cCode)
+            if Len(aStores) > 1
+                aAdd(aItems, storeItem(tdash.fin.u_consolidateStores(aStores, ::creditMode()), lClient))
+            endIf
+            for nX := 1 to Len(aStores)
+                aAdd(aItems, storeItem(aStores[nX], lClient))
+            next nX
+
+            jBody := jsonObject():new()
+            jBody["items"]   := aItems
+            jBody["total"]   := Len(aItems)
+            jBody["hasNext"] := .F.
+        endIf
+        jBody["columns"] := aColumns
+
+        oHelper:setCacheHeaders(aDef[6])
+        oRest:setResponse(oHelper:getResponse(jBody))
+    CATCH oError
+        oHelper:serverError("TDashFinParty:list", oError:description)
+    ENDTRY
+return .T.
+
+/*/{Protheus.doc} searchPage
+Resposta de fin.party_search: até 20 clientes ou fornecedores; hasNext avisa que há mais e a busca deve ser refinada.
+@type method
+@author TDash
+@since 22/10/2026
+@param oRequest, object, TDashRequest
+@param oHelper, object, TDashResponseHelper
+@param aDef, array, definição do indicador
+@return logical, sempre .T.
+/*/
+method searchPage(oRequest as object, oHelper as object, aDef as array) as logical class TDashFinParty
+    local oRepo    := TDashFinPartyRepository():new() as object
+    local jBody    := jsonObject():new() as json
+    local jItem    as json
+    local aRows    := {} as array
+    local aItems   := {} as array
+    local aColumns := {} as array
+    local cType    := Lower(AllTrim(oRequest:query("type"))) as character
+    local cTerm    := AllTrim(oRequest:query("search")) as character
+    local cDetail  := "" as character
+    local nX       := 0 as numeric
+
+    if cType <> "customer" .and. cType <> "supplier"
+        oHelper:badRequest("type inválido. Use customer ou supplier.")
+        return .T.
+    endIf
+    if Len(cTerm) < 3 .or. Len(cTerm) > 40
+        oHelper:badRequest("Informe de 3 a 40 caracteres em search.")
+        return .T.
+    endIf
+
+    aAdd(aColumns, tdash.core.u_jsonColumn("document", "Código", "text"))
+    aAdd(aColumns, tdash.core.u_jsonColumn("party", "Nome", "text"))
+    aAdd(aColumns, tdash.core.u_jsonColumn("detail", "Cadastro", "text"))
+    aAdd(aColumns, tdash.core.u_jsonColumn("stores", "Lojas", "COUNT"))
+
+    TRY
+        aRows := oRepo:search(cType, cTerm, SEARCH_MAX)
+        for nX := 1 to Min(Len(aRows), SEARCH_MAX)
+            cDetail := aRows[nX][3]
+            if !Empty(aRows[nX][4])
+                cDetail += " · " + aRows[nX][4] + "/" + aRows[nX][5]
+            endIf
+            jItem := jsonObject():new()
+            jItem["code"]     := aRows[nX][1]
+            jItem["document"] := aRows[nX][1]
+            jItem["party"]    := aRows[nX][2]
+            jItem["detail"]   := cDetail
+            jItem["stores"]   := aRows[nX][6]
+            aAdd(aItems, jItem)
+        next nX
+
+        jBody["columns"] := aColumns
+        jBody["items"]   := aItems
+        jBody["total"]   := Len(aItems)
+        jBody["hasNext"] := Len(aRows) > SEARCH_MAX
+
+        oHelper:setCacheHeaders(aDef[6])
+        oRest:setResponse(oHelper:getResponse(jBody))
+    CATCH oError
+        oHelper:serverError("TDashFinParty:search", oError:description)
+    ENDTRY
+return .T.
+
+/*/{Protheus.doc} readParty
+Lê e confere type, code e store da requisição. Responde 400 quando faltam ou são inválidos e 404 (TDASH-404-PARTY) quando o código
+não existe no cadastro da filial.
+@type method
+@author TDash
+@since 22/10/2026
+@param oRequest, object, TDashRequest
+@param oHelper, object, TDashResponseHelper
+@return logical, .T. quando pode seguir
+/*/
+method readParty(oRequest as object, oHelper as object) as logical class TDashFinParty
+    local cTable := "SA1" as character
+    local cField := "A1_" as character
+    local cKey   := "" as character
+
+    ::cType  := Lower(AllTrim(oRequest:query("type")))
+    ::cCode  := AllTrim(oRequest:query("code"))
+    ::cStore := AllTrim(oRequest:query("store"))
+
+    if ::cType <> "customer" .and. ::cType <> "supplier"
+        oHelper:badRequest("type inválido. Use customer ou supplier.")
+        return .F.
+    endIf
+    if ::cType == "supplier"
+        cTable := "SA2"
+        cField := "A2_"
+    endIf
+
+    if !tdash.fin.u_validPartyKey(::cCode, TamSX3(cField + "COD")[1])
+        oHelper:badRequest("Informe o código do " + partyNoun(::cType) + " em code.")
+        return .F.
+    endIf
+    if !Empty(::cStore) .and. !tdash.fin.u_validPartyKey(::cStore, TamSX3(cField + "LOJA")[1])
+        oHelper:badRequest("Loja inválida em store.")
+        return .F.
+    endIf
+
+    // Mesmo tamanho do campo, para o bind comparar com o valor gravado
+    ::cCode := PadR(::cCode, TamSX3(cField + "COD")[1])
+    if !Empty(::cStore)
+        ::cStore := PadR(::cStore, TamSX3(cField + "LOJA")[1])
+    endIf
+
+    DbSelectArea(cTable)
+    (cTable)->(DbSetOrder(1))
+    if !(cTable)->(MsSeek(FWxFilial(cTable) + ::cCode + ::cStore))
+        cKey := AllTrim(::cCode)
+        if !Empty(::cStore)
+            cKey += "-" + AllTrim(::cStore)
+        endIf
+        oRest:setStatusCode(404)
+        oRest:setResponse(oHelper:getErrorResponse("TDASH-404-PARTY", Capital(partyNoun(::cType)) + " não encontrado: " + cKey, "Confira o código e a loja na filial escolhida."))
+        return .F.
+    endIf
+return .T.
+
+/*/{Protheus.doc} kpiValue
+Valor de um cartão da posição.
+@type method
+@author TDash
+@since 22/10/2026
+@param cId, character, id do indicador
+@param dFrom, date, início do período (recebido/pago)
+@param dTo, date, fim do período
+@param dToday, date, data de referência dos saldos
+@return numeric, valor
+/*/
+method kpiValue(cId as character, dFrom as date, dTo as date, dToday as date) as numeric class TDashFinParty
+    local oRepo   := TDashFinPartyRepository():new() as object
+    local jCredit as json
+    local nValue  := 0 as numeric
+
+    do case
+        case cId == "fin.party_open"
+            nValue := oRepo:balance(::cType, "open", dToday, ::cCode, ::cStore)
+        case cId == "fin.party_overdue"
+            nValue := oRepo:balance(::cType, "overdue", dToday, ::cCode, ::cStore)
+        case cId == "fin.party_not_due"
+            nValue := oRepo:balance(::cType, "open", dToday, ::cCode, ::cStore) - oRepo:balance(::cType, "overdue", dToday, ::cCode, ::cStore)
+        case cId == "fin.party_settled"
+            nValue := tdash.core.u_sumColumn(oRepo:settled(::cType, dFrom, dTo, ::cCode, ::cStore), 2)
+        otherwise
+            // Limite e disponível. Crédito por cliente (MV_CREDCLI = "C"): limite da primeira loja contra o saldo
+            // de todas as lojas; por loja: limite e saldo da loja escolhida (ou a soma das lojas)
+            jCredit := creditScope(oRepo:stores(::cType, ::cCode), ::cStore, ::creditMode())
+            nValue  := jCredit["limit"]
+            if cId == "fin.party_credit_available"
+                nValue -= oRepo:balance(::cType, "open", dToday, ::cCode, jCredit["store"])
+            endIf
+    endCase
+return Round(nValue, 2)
+
+/*/{Protheus.doc} creditMode
+Controle de crédito por loja ("L") ou por cliente ("C"), do parâmetro MV_CREDCLI.
+@type method
+@author TDash
+@since 22/10/2026
+@return character, "L" ou "C"
+/*/
+method creditMode() as character class TDashFinParty
+return Upper(AllTrim(SuperGetMV("MV_CREDCLI", .F., "L")))
+
+/*/{Protheus.doc} creditScope
+Limite de crédito considerado e a loja cujo saldo é comparado com ele (vazio = todas as lojas).
+@type static function
+@author TDash
+@since 22/10/2026
+@param aStores, array, lojas (json) do cadastro
+@param cStore, character, loja escolhida (vazio = todas)
+@param cMode, character, MV_CREDCLI
+@return json, { limit, store }
+/*/
+static function creditScope(aStores as array, cStore as character, cMode as character) as json
+    local jScope := jsonObject():new() as json
+    local jTotal as json
+    local nPos   := 0 as numeric
+
+    jScope["limit"] := 0
+    jScope["store"] := ""
+    if cMode == "C" .or. Empty(cStore)
+        jTotal := tdash.fin.u_consolidateStores(aStores, cMode)
+        jScope["limit"] := jTotal["creditLimit"]
+    else
+        nPos := AScan(aStores, {|x| x["store"] == AllTrim(cStore)})
+        if nPos > 0
+            jScope["limit"] := aStores[nPos]["creditLimit"]
+        endIf
+        jScope["store"] := cStore
+    endIf
+return jScope
+
+/*/{Protheus.doc} storeItem
+Linha da lista fin.party_stores a partir do cadastro de uma loja (ou da posição de todas as lojas).
+@type static function
+@author TDash
+@since 22/10/2026
+@param jStore, json, loja ou posição consolidada
+@param lClient, logical, .T. para cliente (limite de crédito e média de atraso)
+@return json, item
+/*/
+static function storeItem(jStore as json, lClient as logical) as json
+    local jItem   := jsonObject():new() as json
+    local cDetail := jStore["document"] as character
+
+    if !Empty(jStore["city"])
+        cDetail += " · " + jStore["city"] + "/" + jStore["state"]
+    endIf
+    if jStore["blocked"]
+        cDetail += " · Bloqueado"
+    endIf
+
+    jItem["store"] := jStore["store"]
+    if Empty(jStore["store"])
+        jItem["document"] := "Todas as lojas (" + cValToChar(jStore["stores"]) + ")"
+    else
+        jItem["document"] := "Loja " + jStore["store"]
+    endIf
+    jItem["party"]           := jStore["name"]
+    jItem["detail"]          := cDetail
+    jItem["largestPurchase"] := Round(jStore["largestPurchase"], 2)
+    jItem["largestBalance"]  := Round(jStore["largestBalance"], 2)
+    jItem["firstPurchase"]   := isoDate(jStore["firstPurchase"])
+    jItem["lastPurchase"]    := isoDate(jStore["lastPurchase"])
+    jItem["purchases"]       := jStore["purchases"]
+    jItem["maxDelay"]        := jStore["maxDelay"]
+    if lClient
+        jItem["creditLimit"] := Round(jStore["creditLimit"], 2)
+        jItem["creditDue"]   := isoDate(jStore["creditDue"])
+        jItem["avgDelay"]    := jStore["avgDelay"]
+    endIf
+return jItem
+
+/*/{Protheus.doc} isoDate
+Data AAAAMMDD do banco em AAAA-MM-DD; vazia continua vazia.
+@type static function
+@author TDash
+@since 22/10/2026
+@param cDate, character, data AAAAMMDD
+@return character, data AAAA-MM-DD ou ""
+/*/
+static function isoDate(cDate as character) as character
+    local cIso := "" as character
+
+    if !Empty(cDate)
+        cIso := Transform(cDate, "@R 9999-99-99")
+    endIf
+return cIso
+
+/*/{Protheus.doc} partyNoun
+"cliente" ou "fornecedor", para as mensagens.
+@type static function
+@author TDash
+@since 22/10/2026
+@param cType, character, customer | supplier
+@return character, substantivo
+/*/
+static function partyNoun(cType as character) as character
+    local cNoun := "cliente" as character
+
+    if cType == "supplier"
+        cNoun := "fornecedor"
+    endIf
+return cNoun
+
+/*/{Protheus.doc} u_isPartyId
+Diz se o indicador é da posição de cliente/fornecedor (atendido por TDashFinParty).
+@type user function
+@author TDash
+@since 22/10/2026
+@param cId, character, id do indicador
+@return logical, .T. para fin.party_*
+/*/
+User Function isPartyId(cId as character) as logical
+return Left(AllTrim(cId), 10) == "fin.party_"
+
+/*/{Protheus.doc} u_partyCatalog
+Catálogo da posição de cliente e fornecedor, no mesmo formato dos catálogos de módulo.
+@type user function
+@author TDash
+@since 22/10/2026
+@return array, indicadores { id, tipos, título, unidade, sentido, ttl }
+/*/
+User Function partyCatalog() as array
+return partyCatalog()
+
+/*/{Protheus.doc} partyCatalog
+Catálogo da posição de cliente e fornecedor: { id, tipos, título, unidade, sentido, ttl }.
+@type static function
+@author TDash
+@since 22/10/2026
+@return array, indicadores
+/*/
+static function partyCatalog() as array
+return {;
+    { "fin.party_search",           { "list" },           "Buscar cliente ou fornecedor",   "COUNT", "neutral",      TTL_TAT },;
+    { "fin.party_open",             { "kpi" },            "Em aberto",                      "BRL",   "neutral",      TTL_OP  },;
+    { "fin.party_overdue",          { "kpi" },            "Vencido",                        "BRL",   "down_is_good", TTL_OP  },;
+    { "fin.party_not_due",          { "kpi" },            "A vencer",                       "BRL",   "neutral",      TTL_OP  },;
+    { "fin.party_credit_limit",     { "kpi" },            "Limite de crédito",              "BRL",   "neutral",      TTL_TAT },;
+    { "fin.party_credit_available", { "kpi" },            "Crédito disponível",             "BRL",   "up_is_good",   TTL_OP  },;
+    { "fin.party_settled",          { "kpi", "series" },  "Recebido ou pago no período",    "BRL",   "neutral",      TTL_TAT },;
+    { "fin.party_aging",            { "breakdown" },      "Vencido por atraso",             "BRL",   "down_is_good", TTL_OP  },;
+    { "fin.party_titles",           { "list" },           "Títulos em aberto",              "BRL",   "neutral",      TTL_OP  },;
+    { "fin.party_stores",           { "list" },           "Cadastro e histórico por loja",  "BRL",   "neutral",      TTL_TAT } }

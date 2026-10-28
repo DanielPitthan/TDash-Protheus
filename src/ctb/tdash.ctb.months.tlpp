@@ -1,0 +1,37 @@
+#include 'tlpp-core.th'
+#include 'totvs.ch'
+
+namespace tdash.ctb
+
+/*/{Protheus.doc} u_monthPeriod
+Período das demonstrações em meses inteiros.
+Os saldos da CQ0 e da CQ2 são mensais e gravados com a data do último dia do mês: um período que termina no meio
+do mês perderia o movimento desse mês. Por isso o período vai do primeiro dia do mês inicial ao último dia do mês
+final. A comparação também é em meses: prev = a mesma quantidade de meses imediatamente anterior; yoy = os mesmos
+meses do ano anterior.
+@type user function
+@author TDash
+@since 21/10/2026
+@param dFrom, date, início informado
+@param dTo, date, fim informado
+@param cCompare, character, none | prev | yoy
+@return array, { início, fim, início da comparação, fim da comparação }; datas da comparação vazias quando none
+/*/
+User Function monthPeriod(dFrom as date, dTo as date, cCompare as character) as array
+    local dStart    := FirstDate(dFrom) as date
+    local dEnd      := LastDay(dTo) as date
+    local dPrevFrom := CToD("") as date
+    local dPrevTo   := CToD("") as date
+    local nMonths   := 0 as numeric
+
+    nMonths := (Year(dEnd) * 12 + Month(dEnd)) - (Year(dStart) * 12 + Month(dStart)) + 1
+
+    do case
+        case cCompare == "prev"
+            dPrevFrom := MonthSub(dStart, nMonths)
+            dPrevTo   := dStart - 1
+        case cCompare == "yoy"
+            dPrevFrom := YearSub(dStart, 1)
+            dPrevTo   := LastDay(YearSub(dEnd, 1))
+    endCase
+return { dStart, dEnd, dPrevFrom, dPrevTo }

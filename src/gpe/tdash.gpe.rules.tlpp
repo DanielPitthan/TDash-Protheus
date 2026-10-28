@@ -1,0 +1,253 @@
+#include 'tlpp-core.th'
+#include 'totvs.ch'
+
+namespace tdash.gpe
+
+/*/{Protheus.doc} u_lgpdGroups
+Agrupamento com proteção da LGPD: nenhum grupo devolvido representa menos de nMin pessoas.
+1) Grupos com menos de nMin pessoas vão para "Outros".
+2) Com nTop > 0, ficam os nTop grupos de maior valor; o restante vai para "Outros".
+3) Se "Outros" ficar com menos de nMin pessoas, o menor grupo restante entra nele, até "Outros" ter nMin.
+4) Se o total tiver menos de nMin pessoas, não devolve nada.
+Com nTop = 0 a ordem de entrada é mantida (ex.: faixas de idade).
+@type user function
+@author TDash
+@since 21/10/2026
+@param aRows, array, grupos { chave, rótulo, valor, pessoas }
+@param nMin, numeric, tamanho mínimo de um grupo (MV_TDMINGR)
+@param nTop, numeric, quantidade máxima de grupos nomeados; 0 = sem limite
+@return array, { { chave, rótulo, valor } }, com "others" por último quando houver
+/*/
+User Function lgpdGroups(aRows as array, nMin as numeric, nTop as numeric) as array
+    local aKeep    := {} as array
+    local aResult  := {} as array
+    local nValue   := 0 as numeric
+    local nPeople  := 0 as numeric
+    local nGroups  := 0 as numeric
+    local nTotal   := 0 as numeric
+    local nSmall   := 0 as numeric
+    local nX       := 0 as numeric
+
+    for nX := 1 to Len(aRows)
+        nTotal += aRows[nX][4]
+        if aRows[nX][4] >= nMin
+            aAdd(aKeep, aRows[nX])
+        else
+            nValue  += aRows[nX][3]
+            nPeople += aRows[nX][4]
+            nGroups++
+        endIf
+    next nX
+
+    if nTotal < nMin
+        return aResult
+    endIf
+
+    if nTop > 0 .and. Len(aKeep) > nTop
+        aSort(aKeep, , , {|a, b| a[3] > b[3]})
+        for nX := Len(aKeep) to nTop + 1 step -1
+            nValue  += aKeep[nX][3]
+            nPeople += aKeep[nX][4]
+            nGroups++
+            aDel(aKeep, nX)
+            aSize(aKeep, Len(aKeep) - 1)
+        next nX
+    endIf
+
+    while nPeople > 0 .and. nPeople < nMin .and. Len(aKeep) > 0
+        nSmall := 1
+        for nX := 2 to Len(aKeep)
+            if aKeep[nX][4] < aKeep[nSmall][4]
+                nSmall := nX
+            endIf
+        next nX
+        nValue  += aKeep[nSmall][3]
+        nPeople += aKeep[nSmall][4]
+        nGroups++
+        aDel(aKeep, nSmall)
+        aSize(aKeep, Len(aKeep) - 1)
+    endDo
+
+    for nX := 1 to Len(aKeep)
+        aAdd(aResult, { aKeep[nX][1], aKeep[nX][2], aKeep[nX][3] })
+    next nX
+    if nGroups > 0
+        aAdd(aResult, { "others", "Outros (" + cValToChar(nGroups) + ")", nValue })
+    endIf
+return aResult
+
+/*/{Protheus.doc} u_completedYears
+Anos completos entre duas datas (idade, tempo de casa).
+@type user function
+@author TDash
+@since 21/10/2026
+@param dStart, date, data inicial (nascimento, admissão)
+@param dRef, date, data de referência
+@return numeric, anos completos; -1 quando a data inicial está vazia ou é posterior à referência
+/*/
+User Function completedYears(dStart as date, dRef as date) as numeric
+    local nYears := -1 as numeric
+
+    if !Empty(dStart) .and. dStart <= dRef
+        nYears := Year(dRef) - Year(dStart)
+        if Right(DToS(dRef), 4) < Right(DToS(dStart), 4)
+            nYears--
+        endIf
+    endIf
+return nYears
+
+/*/{Protheus.doc} u_ageBand
+Faixa etária.
+@type user function
+@author TDash
+@since 21/10/2026
+@param dBirth, date, nascimento
+@param dRef, date, data de referência
+@return array, { chave de ordenação, rótulo }
+/*/
+User Function ageBand(dBirth as date, dRef as date) as array
+    local nYears := u_completedYears(dBirth, dRef) as numeric
+    local aBand  := {} as array
+
+    do case
+        case nYears < 0
+            aBand := { "9", "Não informada" }
+        case nYears <= 24
+            aBand := { "1", "Até 24 anos" }
+        case nYears <= 34
+            aBand := { "2", "25 a 34 anos" }
+        case nYears <= 44
+            aBand := { "3", "35 a 44 anos" }
+        case nYears <= 54
+            aBand := { "4", "45 a 54 anos" }
+        otherwise
+            aBand := { "5", "55 anos ou mais" }
+    endCase
+return aBand
+
+/*/{Protheus.doc} u_tenureBand
+Faixa de tempo de casa.
+@type user function
+@author TDash
+@since 21/10/2026
+@param dAdmission, date, admissão
+@param dRef, date, data de referência
+@return array, { chave de ordenação, rótulo }
+/*/
+User Function tenureBand(dAdmission as date, dRef as date) as array
+    local nYears := u_completedYears(dAdmission, dRef) as numeric
+    local aBand  := {} as array
+
+    do case
+        case nYears < 0
+            aBand := { "9", "Não informado" }
+        case nYears < 1
+            aBand := { "1", "Menos de 1 ano" }
+        case nYears <= 2
+            aBand := { "2", "1 a 2 anos" }
+        case nYears <= 5
+            aBand := { "3", "3 a 5 anos" }
+        case nYears <= 10
+            aBand := { "4", "6 a 10 anos" }
+        otherwise
+            aBand := { "5", "Mais de 10 anos" }
+    endCase
+return aBand
+
+/*/{Protheus.doc} u_absenceDays
+Dias corridos de uma ausência dentro do período.
+@type user function
+@author TDash
+@since 21/10/2026
+@param dStart, date, início da ausência
+@param dEnd, date, fim da ausência; vazia = ainda ausente
+@param dFrom, date, início do período
+@param dTo, date, fim do período
+@return numeric, dias (0 quando não há interseção)
+/*/
+User Function absenceDays(dStart as date, dEnd as date, dFrom as date, dTo as date) as numeric
+    local dFirst := dFrom as date
+    local dLast  := dTo as date
+    local nDays  := 0 as numeric
+
+    if dStart > dFrom
+        dFirst := dStart
+    endIf
+    if !Empty(dEnd) .and. dEnd < dTo
+        dLast := dEnd
+    endIf
+    // DateDiffDay devolve a diferença sem sinal: sem interseção, os dias ficam em zero
+    if dLast >= dFirst
+        nDays := DateDiffDay(dFirst, dLast) + 1
+    endIf
+return nDays
+
+/*/{Protheus.doc} u_monthShift
+Soma (ou subtrai) meses de uma competência AAAAMM.
+@type user function
+@author TDash
+@since 21/10/2026
+@param cMonth, character, competência AAAAMM
+@param nDelta, numeric, meses a somar (negativo subtrai)
+@return character, competência AAAAMM
+/*/
+User Function monthShift(cMonth as character, nDelta as numeric) as character
+    local nIndex := Val(Left(cMonth, 4)) * 12 + Val(Right(cMonth, 2)) - 1 + nDelta as numeric
+return StrZero(Int(nIndex / 12), 4) + StrZero(Mod(nIndex, 12) + 1, 2)
+
+/*/{Protheus.doc} u_payrollMonths
+Competências da folha. A folha só tem meses fechados (SRD): o fim do período é limitado à última competência
+fechada; se nenhuma competência fechada cai no período, usa a última fechada. A comparação usa a mesma
+quantidade de meses (prev) ou os mesmos meses do ano anterior (yoy).
+@type user function
+@author TDash
+@since 21/10/2026
+@param cFrom, character, primeira competência pedida (AAAAMM)
+@param cTo, character, última competência pedida (AAAAMM)
+@param cLast, character, última competência fechada até cTo (AAAAMM); vazia quando não há folha
+@param cCompare, character, none | prev | yoy
+@return array, { de, até, de da comparação, até da comparação, .T. quando o intervalo mudou }
+/*/
+User Function payrollMonths(cFrom as character, cTo as character, cLast as character, cCompare as character) as array
+    local cStart    := cFrom as character
+    local cEnd      := cTo as character
+    local cPrevFrom := "" as character
+    local cPrevTo   := "" as character
+    local nMonths   := 0 as numeric
+
+    if !Empty(cLast) .and. cLast < cEnd
+        cEnd := cLast
+        if cEnd < cStart
+            cStart := cLast
+        endIf
+    endIf
+
+    nMonths := (Val(Left(cEnd, 4)) * 12 + Val(Right(cEnd, 2))) - (Val(Left(cStart, 4)) * 12 + Val(Right(cStart, 2))) + 1
+
+    do case
+        case cCompare == "prev"
+            cPrevFrom := u_monthShift(cStart, -nMonths)
+            cPrevTo   := u_monthShift(cStart, -1)
+        case cCompare == "yoy"
+            cPrevFrom := u_monthShift(cStart, -12)
+            cPrevTo   := u_monthShift(cEnd, -12)
+    endCase
+return { cStart, cEnd, cPrevFrom, cPrevTo, cStart <> cFrom .or. cEnd <> cTo }
+
+/*/{Protheus.doc} u_monthLabel
+Rótulo de competências: "set/2026" ou "jul/2026 a set/2026".
+@type user function
+@author TDash
+@since 21/10/2026
+@param cFrom, character, primeira competência (AAAAMM)
+@param cTo, character, última competência (AAAAMM)
+@return character, rótulo
+/*/
+User Function monthLabel(cFrom as character, cTo as character) as character
+    local aNames := { "jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez" } as array
+    local cLabel := aNames[Val(Right(cFrom, 2))] + "/" + Left(cFrom, 4) as character
+
+    if cTo <> cFrom
+        cLabel += " a " + aNames[Val(Right(cTo, 2))] + "/" + Left(cTo, 4)
+    endIf
+return cLabel

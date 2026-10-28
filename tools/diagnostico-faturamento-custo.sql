@@ -1,0 +1,79 @@
+-- TDash: diagnostico do Faturamento - vendas sem custo (aviso "Custo incompleto em 07/2026")
+--
+-- SOMENTE LEITURA: so SELECT, nada e criado nem alterado. Sem dado de pessoa (cliente aparece so pelo codigo).
+-- Objetivo: ver que tipo de movimentacao entra na venda do TDash (SD2 tipo N com TES que gera duplicata) com
+-- D2_CUSTO1 zerado, para decidir se esse tipo deve ficar fora do resultado.
+--
+-- Antes de rodar:
+--   1. troque o sufixo 010 (empresa 01) pelo da empresa usada no TDash;
+--   2. ajuste a filial (4 digitos, a mesma do app: 1001, 1002...) e o mes. SF4 e SB1 servem compartilhados ou exclusivos.
+-- Escrito para SQL Server. Mande o resultado de cada consulta numerada.
+
+DECLARE @FILIAL    VARCHAR(10) = '1001';    -- D2_FILIAL (filial escolhida no app)
+DECLARE @DE        VARCHAR(8)  = '20260701';
+DECLARE @ATE       VARCHAR(8)  = '20260731';
+
+-- 1) Resumo do mes: venda total, venda sem custo e o percentual (deve bater com o aviso do app, 4,38%)
+SELECT COUNT(*) AS LINHAS,
+       SUM(D2.D2_TOTAL) AS VENDA,
+       SUM(CASE WHEN D2.D2_CUSTO1 > 0 THEN 0 ELSE D2.D2_TOTAL END) AS VENDA_SEM_CUSTO,
+       SUM(CASE WHEN D2.D2_CUSTO1 > 0 THEN 0 ELSE 1 END) AS LINHAS_SEM_CUSTO,
+       CAST(100.0 * SUM(CASE WHEN D2.D2_CUSTO1 > 0 THEN 0 ELSE D2.D2_TOTAL END) / NULLIF(SUM(D2.D2_TOTAL), 0) AS DECIMAL(9,2)) AS PCT_SEM_CUSTO
+FROM SD2010 D2
+INNER JOIN SF4010 F4 ON F4.F4_FILIAL IN (@FILIAL, ' ') AND F4.F4_CODIGO = D2.D2_TES AND F4.F4_DUPLIC = 'S' AND F4.D_E_L_E_T_ = ' '
+WHERE D2.D2_FILIAL = @FILIAL AND D2.D2_TIPO = 'N' AND D2.D2_EMISSAO BETWEEN @DE AND @ATE AND D2.D_E_L_E_T_ = ' ';
+
+-- 2) Vendas sem custo por TES e CFOP: o que a TES faz (atualiza estoque? poder de terceiro? ISS/servico?)
+SELECT D2.D2_TES AS TES, RTRIM(F4.F4_TEXTO) AS TEXTO_TES, D2.D2_CF AS CFOP,
+       F4.F4_ESTOQUE AS ATUALIZA_ESTOQUE, F4.F4_PODER3 AS PODER_TERCEIRO, F4.F4_ISS AS CALCULA_ISS,
+       COUNT(*) AS LINHAS, SUM(D2.D2_TOTAL) AS VENDA_SEM_CUSTO
+FROM SD2010 D2
+INNER JOIN SF4010 F4 ON F4.F4_FILIAL IN (@FILIAL, ' ') AND F4.F4_CODIGO = D2.D2_TES AND F4.F4_DUPLIC = 'S' AND F4.D_E_L_E_T_ = ' '
+WHERE D2.D2_FILIAL = @FILIAL AND D2.D2_TIPO = 'N' AND D2.D2_EMISSAO BETWEEN @DE AND @ATE AND D2.D_E_L_E_T_ = ' '
+  AND D2.D2_CUSTO1 <= 0
+GROUP BY D2.D2_TES, F4.F4_TEXTO, D2.D2_CF, F4.F4_ESTOQUE, F4.F4_PODER3, F4.F4_ISS
+ORDER BY VENDA_SEM_CUSTO DESC;
+
+-- 3) Vendas sem custo por tipo de produto (B1_TIPO: PA, MP, SV, ...) e armazem
+SELECT B1.B1_TIPO AS TIPO_PRODUTO, D2.D2_LOCAL AS ARMAZEM,
+       COUNT(*) AS LINHAS, SUM(D2.D2_TOTAL) AS VENDA_SEM_CUSTO
+FROM SD2010 D2
+INNER JOIN SF4010 F4 ON F4.F4_FILIAL IN (@FILIAL, ' ') AND F4.F4_CODIGO = D2.D2_TES AND F4.F4_DUPLIC = 'S' AND F4.D_E_L_E_T_ = ' '
+LEFT JOIN SB1010 B1 ON B1.B1_FILIAL IN (@FILIAL, ' ') AND B1.B1_COD = D2.D2_COD AND B1.D_E_L_E_T_ = ' '
+WHERE D2.D2_FILIAL = @FILIAL AND D2.D2_TIPO = 'N' AND D2.D2_EMISSAO BETWEEN @DE AND @ATE AND D2.D_E_L_E_T_ = ' '
+  AND D2.D2_CUSTO1 <= 0
+GROUP BY B1.B1_TIPO, D2.D2_LOCAL
+ORDER BY VENDA_SEM_CUSTO DESC;
+
+-- 4) Mesmas TES no mes: linhas com e sem custo. TES sempre sem custo = e o tipo de movimento;
+--    TES com parte sem custo = o recalculo do custo medio nao pegou essas notas
+SELECT D2.D2_TES AS TES,
+       SUM(CASE WHEN D2.D2_CUSTO1 > 0 THEN 1 ELSE 0 END) AS LINHAS_COM_CUSTO,
+       SUM(CASE WHEN D2.D2_CUSTO1 > 0 THEN 0 ELSE 1 END) AS LINHAS_SEM_CUSTO,
+       SUM(D2.D2_TOTAL) AS VENDA_TOTAL_TES
+FROM SD2010 D2
+INNER JOIN SF4010 F4 ON F4.F4_FILIAL IN (@FILIAL, ' ') AND F4.F4_CODIGO = D2.D2_TES AND F4.F4_DUPLIC = 'S' AND F4.D_E_L_E_T_ = ' '
+WHERE D2.D2_FILIAL = @FILIAL AND D2.D2_TIPO = 'N' AND D2.D2_EMISSAO BETWEEN @DE AND @ATE AND D2.D_E_L_E_T_ = ' '
+  AND D2.D2_TES IN (SELECT X.D2_TES FROM SD2010 X
+                    WHERE X.D2_FILIAL = @FILIAL AND X.D2_TIPO = 'N' AND X.D2_EMISSAO BETWEEN @DE AND @ATE
+                      AND X.D2_CUSTO1 <= 0 AND X.D_E_L_E_T_ = ' ')
+GROUP BY D2.D2_TES
+ORDER BY LINHAS_SEM_CUSTO DESC;
+
+-- 5) As 50 maiores linhas sem custo (cliente so pelo codigo)
+SELECT TOP 50 D2.D2_DOC AS NOTA, D2.D2_SERIE AS SERIE, D2.D2_EMISSAO AS EMISSAO, D2.D2_CLIENTE AS CLIENTE,
+       RTRIM(D2.D2_COD) AS PRODUTO, RTRIM(B1.B1_DESC) AS DESCRICAO, B1.B1_TIPO AS TIPO_PRODUTO,
+       D2.D2_TES AS TES, D2.D2_CF AS CFOP, D2.D2_LOCAL AS ARMAZEM, D2.D2_QUANT AS QUANT,
+       D2.D2_TOTAL AS TOTAL, D2.D2_CUSTO1 AS CUSTO, D2.D2_PEDIDO AS PEDIDO_VENDA
+FROM SD2010 D2
+INNER JOIN SF4010 F4 ON F4.F4_FILIAL IN (@FILIAL, ' ') AND F4.F4_CODIGO = D2.D2_TES AND F4.F4_DUPLIC = 'S' AND F4.D_E_L_E_T_ = ' '
+LEFT JOIN SB1010 B1 ON B1.B1_FILIAL IN (@FILIAL, ' ') AND B1.B1_COD = D2.D2_COD AND B1.D_E_L_E_T_ = ' '
+WHERE D2.D2_FILIAL = @FILIAL AND D2.D2_TIPO = 'N' AND D2.D2_EMISSAO BETWEEN @DE AND @ATE AND D2.D_E_L_E_T_ = ' '
+  AND D2.D2_CUSTO1 <= 0
+ORDER BY D2.D2_TOTAL DESC;
+
+-- 6) Fechamento de estoque: data do ultimo fechamento (MV_ULMES) e parametros de custo
+SELECT X6_FIL AS FILIAL, RTRIM(X6_VAR) AS PARAMETRO, RTRIM(X6_CONTEUD) AS CONTEUDO
+FROM SX6010
+WHERE D_E_L_E_T_ = ' ' AND X6_VAR IN ('MV_ULMES', 'MV_DBLQMOV', 'MV_CUSMED')
+ORDER BY X6_VAR, X6_FIL;

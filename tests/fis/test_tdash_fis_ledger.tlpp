@@ -1,0 +1,145 @@
+#include "tlpp-core.th"
+#include "tlpp-probat.th"
+
+namespace tests.fis
+
+/*/{Protheus.doc} test_tdash_fis_ledger
+Testes PROBAT da centralização de débitos e créditos do Fiscal, sem banco.
+Exemplo da regra: ICMS débito 1.000 e crédito 400 = saldo 600 a recolher; CBS e IBS ficam fora do total.
+Execução: appserver.exe -console -consolelog -run=tlpp.probat.run -env={AMBIENTE}
+@type class
+@author TDash
+@since 27/10/2026
+/*/
+@TestFixture()
+Class test_tdash_fis_ledger
+    Public Method New() as Object
+
+    @Test('ledgerAccumulate: soma os dias no mês e mantém os meses em ordem')
+    Public Method ledgerAccumulate_GroupsByMonth() as Logical
+
+    @Test('ledgerTotals: soma débito e crédito sem CBS e IBS')
+    Public Method ledgerTotals_ExcludesCbsIbs() as Logical
+
+    @Test('ledgerLines: saldo, situação e linha de total')
+    Public Method ledgerLines_BalanceAndStatus() as Logical
+
+    @Test('branchLines: saldo por filial e soma das filiais')
+    Public Method branchLines_BalancePerBranch() as Logical
+
+    @Test('taxBurden: tributos das saídas sobre o valor contábil das saídas')
+    Public Method taxBurden_Percent() as Logical
+
+    @Test('ncmLabel: formata o NCM e trata vazio ou zerado')
+    Public Method ncmLabel_Format() as Logical
+EndClass
+
+Method New() as Object Class test_tdash_fis_ledger
+Return Self
+
+Static Function values(aPairs as array) as json
+    local jValues := jsonObject():new() as json
+    local nX      := 0 as numeric
+
+    for nX := 1 to Len(aPairs)
+        jValues[aPairs[nX][1]] := aPairs[nX][2]
+    next nX
+return jValues
+
+Method ledgerAccumulate_GroupsByMonth() as Logical Class test_tdash_fis_ledger
+    local aMonths := {} as array
+
+    tdash.fis.u_ledgerAccumulate(aMonths, "20261005", values({ { "icms_d", 100 }, { "icms_c", 40 } }))
+    tdash.fis.u_ledgerAccumulate(aMonths, "20260920", values({ { "icms_d", 50 } }))
+    tdash.fis.u_ledgerAccumulate(aMonths, "20261020", values({ { "icms_d", 10 }, { "campo_estranho", 999 } }))
+
+    tlpp.probat.assertEquals(Len(aMonths), 2)
+    tlpp.probat.assertEquals(aMonths[1]["month"], "2026-09")
+    tlpp.probat.assertEquals(aMonths[1]["icms_d"], 50)
+    tlpp.probat.assertEquals(aMonths[2]["month"], "2026-10")
+    tlpp.probat.assertEquals(aMonths[2]["icms_d"], 110)
+    tlpp.probat.assertEquals(aMonths[2]["icms_c"], 40)
+    tlpp.probat.assertEquals(aMonths[2]:hasProperty("campo_estranho"), .F.)
+Return .T.
+
+Method ledgerTotals_ExcludesCbsIbs() as Logical Class test_tdash_fis_ledger
+    local jRow := tdash.fis.u_ledgerNewRow("2026-10") as json
+    local jTotals as json
+
+    jRow["icms_d"]    := 1000
+    jRow["icms_c"]    := 400
+    jRow["pis_d"]     := 16.5
+    jRow["iss_ret_d"] := 20
+    jRow["cbs_d"]     := 9
+    jRow["cbs_c"]     := 3
+    jTotals := tdash.fis.u_ledgerTotals(jRow)
+
+    tlpp.probat.assertEquals(jTotals["debit"], 1036.5)
+    tlpp.probat.assertEquals(jTotals["credit"], 400)
+    tlpp.probat.assertEquals(jTotals["balance"], 636.5)
+Return .T.
+
+Method ledgerLines_BalanceAndStatus() as Logical Class test_tdash_fis_ledger
+    local jSum   := tdash.fis.u_ledgerNewRow("") as json
+    local aLines := {} as array
+
+    jSum["icms_d"] := 1000
+    jSum["icms_c"] := 400
+    jSum["ipi_d"]  := 10
+    jSum["ipi_c"]  := 50
+    jSum["cbs_d"]  := 9
+    aLines := tdash.fis.u_ledgerLines(jSum)
+
+    tlpp.probat.assertEquals(Len(aLines), Len(tdash.fis.u_ledgerTaxes()) + 1)
+    tlpp.probat.assertEquals(aLines[1]["key"], "icms")
+    tlpp.probat.assertEquals(aLines[1]["balance"], 600)
+    tlpp.probat.assertEquals(aLines[1]["status"], "A recolher")
+    tlpp.probat.assertEquals(aLines[4]["key"], "ipi")
+    tlpp.probat.assertEquals(aLines[4]["status"], "Credor")
+    tlpp.probat.assertEquals(aLines[5]["status"], "Zerado")
+    tlpp.probat.assertEquals(aLines[9]["tax"], "CBS (fora do total)")
+    tlpp.probat.assertEquals(aLines[Len(aLines)]["key"], "total")
+    tlpp.probat.assertEquals(aLines[Len(aLines)]["balance"], 560)
+Return .T.
+
+Method branchLines_BalancePerBranch() as Logical Class test_tdash_fis_ledger
+    local jFirst  := tdash.fis.u_ledgerNewRow("") as json
+    local jSecond := tdash.fis.u_ledgerNewRow("") as json
+    local aLines  := {} as array
+
+    jFirst["icms_d"]  := 1000
+    jFirst["icms_c"]  := 400
+    jSecond["icms_d"] := 100
+    jSecond["icms_c"] := 300
+    jSecond["cbs_d"]  := 5
+    aLines := tdash.fis.u_branchLines({ { "1001", jFirst }, { "1002", jSecond } })
+
+    tlpp.probat.assertEquals(aLines[1]["b_1001"], 600)
+    tlpp.probat.assertEquals(aLines[1]["b_1002"], -200)
+    tlpp.probat.assertEquals(aLines[1]["total"], 400)
+    tlpp.probat.assertEquals(aLines[9]["total"], 5)
+    tlpp.probat.assertEquals(aLines[Len(aLines)]["key"], "total")
+    tlpp.probat.assertEquals(aLines[Len(aLines)]["total"], 400)
+Return .T.
+
+Method taxBurden_Percent() as Logical Class test_tdash_fis_ledger
+    local jSum := tdash.fis.u_ledgerNewRow("") as json
+
+    tlpp.probat.assertEquals(tdash.fis.u_taxBurden(jSum), 0)
+
+    jSum["icms_d"]   := 120
+    jSum["ipi_d"]    := 10
+    jSum["pis_d"]    := 16.5
+    jSum["cofins_d"] := 76
+    jSum["iss_d"]    := 2
+    jSum["icms_c"]   := 500
+    jSum["outValue"] := 1000
+    tlpp.probat.assertEquals(tdash.fis.u_taxBurden(jSum), 22.45)
+Return .T.
+
+Method ncmLabel_Format() as Logical Class test_tdash_fis_ledger
+    tlpp.probat.assertEquals(tdash.fis.u_ncmLabel("32074010  "), "3207.40.10")
+    tlpp.probat.assertEquals(tdash.fis.u_ncmLabel("00000000"), "Sem NCM")
+    tlpp.probat.assertEquals(tdash.fis.u_ncmLabel("   "), "Sem NCM")
+    tlpp.probat.assertEquals(tdash.fis.u_ncmLabel("8471"), "8471")
+Return .T.

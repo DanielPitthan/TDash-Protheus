@@ -1,0 +1,75 @@
+#include "tlpp-core.th"
+#include "tlpp-probat.th"
+
+namespace tests.ctb
+
+/*/{Protheus.doc} test_tdash_ctb_months
+Testes PROBAT do período em meses inteiros das demonstrações (sem banco).
+Execução: appserver.exe -console -consolelog -run=tlpp.probat.run -env={AMBIENTE}
+@type class
+@author TDash
+@since 21/10/2026
+/*/
+@TestFixture()
+Class test_tdash_ctb_months
+    Public Method New() as Object
+
+    @Test('monthPeriod: mês até hoje vira o mês inteiro e compara com o mês anterior inteiro')
+    Public Method monthPeriod_MonthToDate_UsesWholeMonths() as Logical
+
+    @Test('monthPeriod: período de três meses compara com os três meses anteriores')
+    Public Method monthPeriod_Quarter_ComparesSameNumberOfMonths() as Logical
+
+    @Test('monthPeriod: janeiro compara com dezembro do ano anterior')
+    Public Method monthPeriod_January_CrossesYear() as Logical
+
+    @Test('monthPeriod: ano anterior em fevereiro bissexto termina no último dia do mês')
+    Public Method monthPeriod_YearOverYear_LeapFebruary() as Logical
+
+    @Test('monthPeriod: sem comparação devolve as datas da comparação vazias')
+    Public Method monthPeriod_NoCompare_ReturnsEmptyCompareDates() as Logical
+EndClass
+
+Method New() as Object Class test_tdash_ctb_months
+Return Self
+
+Method monthPeriod_MonthToDate_UsesWholeMonths() as Logical Class test_tdash_ctb_months
+    Local aPeriod := tdash.ctb.u_monthPeriod(SToD("20261001"), SToD("20261021"), "prev") as Array
+
+    tlpp.probat.assertEquals(DToS(aPeriod[1]), "20261001")
+    tlpp.probat.assertEquals(DToS(aPeriod[2]), "20261031")
+    tlpp.probat.assertEquals(DToS(aPeriod[3]), "20260901")
+    tlpp.probat.assertEquals(DToS(aPeriod[4]), "20260930")
+Return .T.
+
+Method monthPeriod_Quarter_ComparesSameNumberOfMonths() as Logical Class test_tdash_ctb_months
+    Local aPeriod := tdash.ctb.u_monthPeriod(SToD("20260715"), SToD("20260910"), "prev") as Array
+
+    tlpp.probat.assertEquals(DToS(aPeriod[1]), "20260701")
+    tlpp.probat.assertEquals(DToS(aPeriod[2]), "20260930")
+    tlpp.probat.assertEquals(DToS(aPeriod[3]), "20260401")
+    tlpp.probat.assertEquals(DToS(aPeriod[4]), "20260630")
+Return .T.
+
+Method monthPeriod_January_CrossesYear() as Logical Class test_tdash_ctb_months
+    Local aPeriod := tdash.ctb.u_monthPeriod(SToD("20260101"), SToD("20260115"), "prev") as Array
+
+    tlpp.probat.assertEquals(DToS(aPeriod[3]), "20251201")
+    tlpp.probat.assertEquals(DToS(aPeriod[4]), "20251231")
+Return .T.
+
+Method monthPeriod_YearOverYear_LeapFebruary() as Logical Class test_tdash_ctb_months
+    Local aPeriod := tdash.ctb.u_monthPeriod(SToD("20240201"), SToD("20240229"), "yoy") as Array
+
+    tlpp.probat.assertEquals(DToS(aPeriod[2]), "20240229")
+    tlpp.probat.assertEquals(DToS(aPeriod[3]), "20230201")
+    tlpp.probat.assertEquals(DToS(aPeriod[4]), "20230228")
+Return .T.
+
+Method monthPeriod_NoCompare_ReturnsEmptyCompareDates() as Logical Class test_tdash_ctb_months
+    Local aPeriod := tdash.ctb.u_monthPeriod(SToD("20261001"), SToD("20261021"), "none") as Array
+
+    tlpp.probat.assertEquals(DToS(aPeriod[2]), "20261031")
+    tlpp.probat.assertEquals(Empty(aPeriod[3]), .T.)
+    tlpp.probat.assertEquals(Empty(aPeriod[4]), .T.)
+Return .T.

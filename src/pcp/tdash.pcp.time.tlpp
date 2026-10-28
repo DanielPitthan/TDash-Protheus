@@ -1,0 +1,64 @@
+#include 'tlpp-core.th'
+#include 'totvs.ch'
+
+namespace tdash.pcp
+
+/*/{Protheus.doc} u_timeToHours
+Converte o tempo da SH6 (texto "HH:MM" ou "HHH:MM") em horas decimais.
+No formato normal a parte depois dos dois-pontos são minutos (válidos até 59); no centesimal são centésimos de hora
+("01:50" = 1,5 h), como o padrão do PCP faz com H6_TIPOTEM.
+Texto vazio, sem número ou com minutos inválidos vale 0.
+@type user function
+@author TDash
+@since 21/10/2026
+@param cTime, character, tempo em texto (H6_TEMPO)
+@param lCentesimal, logical, .T. quando o tempo está em centésimos de hora (u_isCentesimal)
+@return numeric, horas com 2 casas
+/*/
+User Function timeToHours(cTime as character, lCentesimal as logical) as numeric
+    local cText    := AllTrim(cTime) as character
+    local nColon   := At(":", cText) as numeric
+    local cHours   := "" as character
+    local cMinutes := "" as character
+    local nMinutes := 0 as numeric
+
+    if Empty(cText) .or. nColon == 0
+        return 0
+    endIf
+
+    cHours   := AllTrim(Left(cText, nColon - 1))
+    cMinutes := AllTrim(SubStr(cText, nColon + 1))
+    if !tdash.core.u_isDigits(cHours) .or. !tdash.core.u_isDigits(cMinutes)
+        return 0
+    endIf
+
+    if lCentesimal
+        return Round(Val(cHours) + (Val(cMinutes) / 100), 2)
+    endIf
+
+    nMinutes := Val(cMinutes)
+    if nMinutes >= 60
+        return 0
+    endIf
+return Round(Val(cHours) + (nMinutes / 60), 2)
+
+/*/{Protheus.doc} u_isCentesimal
+Diz se o tempo de um apontamento da SH6 está em centésimos de hora.
+H6_TIPOTEM 1 = normal e 2 = centesimal (o mesmo critério do padrão do PCP); sem o campo preenchido vale o parâmetro
+MV_TPHR do ambiente ("C" = centesimal, "N" = normal).
+@type user function
+@author TDash
+@since 22/10/2026
+@param nTimeType, numeric, H6_TIPOTEM
+@param cDefault, character, MV_TPHR
+@return logical, .T. quando centesimal
+/*/
+User Function isCentesimal(nTimeType as numeric, cDefault as character) as logical
+    local lCentesimal := .F. as logical
+
+    if nTimeType == 2
+        lCentesimal := .T.
+    elseIf nTimeType <> 1
+        lCentesimal := Upper(AllTrim(cDefault)) == "C"
+    endIf
+return lCentesimal

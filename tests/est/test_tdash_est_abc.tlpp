@@ -1,0 +1,76 @@
+#include "tlpp-core.th"
+#include "tlpp-probat.th"
+
+namespace tests.est
+
+/*/{Protheus.doc} test_tdash_est_abc
+Testes PROBAT da classificação ABC do estoque (sem banco).
+Execução: appserver.exe -console -consolelog -run=tlpp.probat.run -env={AMBIENTE}
+@type class
+@author TDash
+@since 21/10/2026
+/*/
+@TestFixture()
+Class test_tdash_est_abc
+    Public Method New() as Object
+
+    @Test('abcClassify: 80/15/5 vira uma classe para cada valor')
+    Public Method abcClassify_EightyFifteenFive_OneItemPerClass() as Logical
+
+    @Test('abcClassify: valores iguais ficam 8 em A e 2 em B')
+    Public Method abcClassify_EqualValues_EightAAndTwoB() as Logical
+
+    @Test('abcClassify: zerados e negativos são ignorados')
+    Public Method abcClassify_ZeroAndNegative_AreIgnored() as Logical
+
+    @Test('abcClassify: lista vazia devolve tudo zerado')
+    Public Method abcClassify_Empty_ReturnsZeros() as Logical
+
+    @Test('abcClassify: item único é sempre classe A')
+    Public Method abcClassify_SingleItem_IsClassA() as Logical
+EndClass
+
+Method New() as Object Class test_tdash_est_abc
+Return Self
+
+Method abcClassify_EightyFifteenFive_OneItemPerClass() as Logical Class test_tdash_est_abc
+    // A ordem de entrada não importa: a função ordena do maior para o menor
+    Local aClasses := tdash.est.u_abcClassify({ 5, 80, 15 }) as Array
+
+    tlpp.probat.assertEquals(aClasses[1][1], 1)
+    tlpp.probat.assertEquals(aClasses[1][2], 80)
+    tlpp.probat.assertEquals(aClasses[2][1], 1)
+    tlpp.probat.assertEquals(aClasses[2][2], 15)
+    tlpp.probat.assertEquals(aClasses[3][1], 1)
+    tlpp.probat.assertEquals(aClasses[3][2], 5)
+Return .T.
+
+Method abcClassify_EqualValues_EightAAndTwoB() as Logical Class test_tdash_est_abc
+    Local aClasses := tdash.est.u_abcClassify({ 10, 10, 10, 10, 10, 10, 10, 10, 10, 10 }) as Array
+
+    tlpp.probat.assertEquals(aClasses[1][1], 8)
+    tlpp.probat.assertEquals(aClasses[2][1], 2)
+    tlpp.probat.assertEquals(aClasses[3][1], 0)
+Return .T.
+
+Method abcClassify_ZeroAndNegative_AreIgnored() as Logical Class test_tdash_est_abc
+    Local aClasses := tdash.est.u_abcClassify({ 0, -50, 100 }) as Array
+
+    tlpp.probat.assertEquals(aClasses[1][1], 1)
+    tlpp.probat.assertEquals(aClasses[1][2], 100)
+    tlpp.probat.assertEquals(aClasses[2][1] + aClasses[3][1], 0)
+Return .T.
+
+Method abcClassify_Empty_ReturnsZeros() as Logical Class test_tdash_est_abc
+    Local aClasses := tdash.est.u_abcClassify({}) as Array
+
+    tlpp.probat.assertEquals(Len(aClasses), 3)
+    tlpp.probat.assertEquals(aClasses[1][1] + aClasses[2][1] + aClasses[3][1], 0)
+Return .T.
+
+Method abcClassify_SingleItem_IsClassA() as Logical Class test_tdash_est_abc
+    Local aClasses := tdash.est.u_abcClassify({ 42 }) as Array
+
+    tlpp.probat.assertEquals(aClasses[1][1], 1)
+    tlpp.probat.assertEquals(aClasses[1][2], 42)
+Return .T.

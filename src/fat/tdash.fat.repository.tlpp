@@ -1,0 +1,588 @@
+#include 'tlpp-core.th'
+#include 'totvs.ch'
+
+namespace tdash.fat
+
+/*/{Protheus.doc} TDashFatRepository
+Consultas dos indicadores do Faturamento (SD2, SF2, SF4, SD1, SC6, SCT, SA1, SA3, SB1, F2D, F2B).
+Faturamento = itens de saída normais (D2_TIPO = 'N') com TES que gera duplicata (F4_DUPLIC = 'S'),
+pelo valor bruto (D2_VALBRUT). Devoluções = notas de entrada tipo D pelo valor bruto
+(D1_TOTAL + D1_VALIPI + D1_ICMSRET). Regras: docs/10-catalogo-de-indicadores.md (Faturamento).
+@type class
+@author TDash
+@since 20/10/2026
+@version 1.0
+/*/
+class TDashFatRepository
+    public method new()
+
+    public method revenue(dFrom as date, dTo as date) as numeric
+    public method invoiceCount(dFrom as date, dTo as date) as numeric
+    public method returns(dFrom as date, dTo as date) as numeric
+    public method target(dFrom as date, dTo as date) as numeric
+    public method revenueByDay(dFrom as date, dTo as date) as array
+    public method returnsByDay(dFrom as date, dTo as date) as array
+    public method revenueBy(cDimension as character, dFrom as date, dTo as date, nTop as numeric) as array
+    public method backlog() as numeric
+    public method backlogItems(nPage as numeric, nPageSize as numeric) as json
+    public method resultRows(dFrom as date, dTo as date) as array
+
+    private method salesFrom(cJoin as character) as character
+    private method bindSales(oQuery as object, dFrom as date, dTo as date)
+    private method numberOf(cAlias as character, cField as character) as numeric
+    private method backlogWhere() as character
+    private method reformTaxes(cTable as character) as character
+    private method readResultRows(oQuery as object, cKind as character, aRows as array)
+endclass
+
+method new() class TDashFatRepository
+return self
+
+/*/{Protheus.doc} revenue
+Faturamento bruto do período.
+@type method
+@author TDash
+@since 20/10/2026
+@param dFrom, date, início (D2_EMISSAO)
+@param dTo, date, fim
+@return numeric, valor
+/*/
+method revenue(dFrom as date, dTo as date) as numeric class TDashFatRepository
+    local nTotal := 0 as numeric
+    local oQuery as object
+
+    oQuery := tdash.core.TDashQuery():new(" SELECT SUM(D2.D2_VALBRUT) TOTAL " + ::salesFrom(""))
+    ::bindSales(oQuery, dFrom, dTo)
+    if oQuery:open()
+        nTotal := ::numberOf(oQuery:getAlias(), "TOTAL")
+        oQuery:close()
+    endIf
+return nTotal
+
+/*/{Protheus.doc} invoiceCount
+Quantidade de notas fiscais (documento + série distintos) do período.
+@type method
+@author TDash
+@since 20/10/2026
+@param dFrom, date, início
+@param dTo, date, fim
+@return numeric, quantidade
+/*/
+method invoiceCount(dFrom as date, dTo as date) as numeric class TDashFatRepository
+    local nTotal := 0 as numeric
+    local oQuery as object
+
+    oQuery := tdash.core.TDashQuery():new(" SELECT COUNT(*) TOTAL FROM ( SELECT DISTINCT D2.D2_DOC, D2.D2_SERIE " + ::salesFrom("") + " ) NF ")
+    ::bindSales(oQuery, dFrom, dTo)
+    if oQuery:open()
+        nTotal := ::numberOf(oQuery:getAlias(), "TOTAL")
+        oQuery:close()
+    endIf
+return nTotal
+
+/*/{Protheus.doc} returns
+Devoluções de venda (notas de entrada tipo D) pelo valor bruto.
+@type method
+@author TDash
+@since 20/10/2026
+@param dFrom, date, início (D1_DTDIGIT)
+@param dTo, date, fim
+@return numeric, valor
+/*/
+method returns(dFrom as date, dTo as date) as numeric class TDashFatRepository
+    local nTotal := 0 as numeric
+    local cQry   := "" as character
+    local oQuery as object
+
+    cQry := " SELECT SUM(D1.D1_TOTAL + D1.D1_VALIPI + D1.D1_ICMSRET) TOTAL "
+    cQry += " FROM " + RetSqlName("SD1") + " D1 "
+    cQry += " WHERE D1.D1_FILIAL = ? "
+    cQry += " AND D1.D1_TIPO = 'D' "
+    cQry += " AND D1.D1_DTDIGIT BETWEEN ? AND ? "
+    cQry += " AND D1.D_E_L_E_T_ = ' ' "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    oQuery:setString(1, FWxFilial("SD1"))
+    oQuery:setString(2, DToS(dFrom))
+    oQuery:setString(3, DToS(dTo))
+    if oQuery:open()
+        nTotal := ::numberOf(oQuery:getAlias(), "TOTAL")
+        oQuery:close()
+    endIf
+return nTotal
+
+/*/{Protheus.doc} target
+Meta de vendas do período (SCT).
+@type method
+@author TDash
+@since 20/10/2026
+@param dFrom, date, início (CT_DATA)
+@param dTo, date, fim
+@return numeric, meta (0 quando não há meta cadastrada)
+/*/
+method target(dFrom as date, dTo as date) as numeric class TDashFatRepository
+    local nTotal := 0 as numeric
+    local cQry   := "" as character
+    local oQuery as object
+
+    cQry := " SELECT SUM(CT.CT_VALOR) TOTAL "
+    cQry += " FROM " + RetSqlName("SCT") + " CT "
+    cQry += " WHERE CT.CT_FILIAL = ? "
+    cQry += " AND CT.CT_DATA BETWEEN ? AND ? "
+    cQry += " AND CT.D_E_L_E_T_ = ' ' "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    oQuery:setString(1, FWxFilial("SCT"))
+    oQuery:setString(2, DToS(dFrom))
+    oQuery:setString(3, DToS(dTo))
+    if oQuery:open()
+        nTotal := ::numberOf(oQuery:getAlias(), "TOTAL")
+        oQuery:close()
+    endIf
+return nTotal
+
+/*/{Protheus.doc} revenueByDay
+Faturamento bruto por dia de emissão.
+@type method
+@author TDash
+@since 20/10/2026
+@param dFrom, date, início
+@param dTo, date, fim
+@return array, { { data AAAAMMDD, valor }, ... }
+/*/
+method revenueByDay(dFrom as date, dTo as date) as array class TDashFatRepository
+    local aRows  := {} as array
+    local cAlias := "" as character
+    local oQuery as object
+
+    oQuery := tdash.core.TDashQuery():new(" SELECT D2.D2_EMISSAO DIA, SUM(D2.D2_VALBRUT) VALOR " + ::salesFrom("") + " GROUP BY D2.D2_EMISSAO ORDER BY D2.D2_EMISSAO ")
+    ::bindSales(oQuery, dFrom, dTo)
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof())
+            aAdd(aRows, { (cAlias)->DIA, (cAlias)->VALOR })
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+return aRows
+
+/*/{Protheus.doc} returnsByDay
+Devoluções por dia de digitação.
+@type method
+@author TDash
+@since 20/10/2026
+@param dFrom, date, início
+@param dTo, date, fim
+@return array, { { data AAAAMMDD, valor }, ... }
+/*/
+method returnsByDay(dFrom as date, dTo as date) as array class TDashFatRepository
+    local aRows  := {} as array
+    local cQry   := "" as character
+    local cAlias := "" as character
+    local oQuery as object
+
+    cQry := " SELECT D1.D1_DTDIGIT DIA, SUM(D1.D1_TOTAL + D1.D1_VALIPI + D1.D1_ICMSRET) VALOR "
+    cQry += " FROM " + RetSqlName("SD1") + " D1 "
+    cQry += " WHERE D1.D1_FILIAL = ? "
+    cQry += " AND D1.D1_TIPO = 'D' "
+    cQry += " AND D1.D1_DTDIGIT BETWEEN ? AND ? "
+    cQry += " AND D1.D_E_L_E_T_ = ' ' "
+    cQry += " GROUP BY D1.D1_DTDIGIT ORDER BY D1.D1_DTDIGIT "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    oQuery:setString(1, FWxFilial("SD1"))
+    oQuery:setString(2, DToS(dFrom))
+    oQuery:setString(3, DToS(dTo))
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof())
+            aAdd(aRows, { (cAlias)->DIA, (cAlias)->VALOR })
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+return aRows
+
+/*/{Protheus.doc} revenueBy
+Faturamento bruto agrupado por cliente, produto, vendedor ou UF, do maior para o menor.
+@type method
+@author TDash
+@since 20/10/2026
+@param cDimension, character, customer | product | seller | state
+@param dFrom, date, início
+@param dTo, date, fim
+@param nTop, numeric, quantidade de linhas (0 = todas)
+@return array, { { chave, rótulo, valor }, ... }
+/*/
+method revenueBy(cDimension as character, dFrom as date, dTo as date, nTop as numeric) as array class TDashFatRepository
+    local aRows   := {} as array
+    local cSelect := "" as character
+    local cJoin   := "" as character
+    local cGroup  := "" as character
+    local cAlias  := "" as character
+    local cLabel  := "" as character
+    local nBind   := 0 as numeric
+    local oQuery  as object
+
+    do case
+        case cDimension == "customer"
+            cSelect := " D2.D2_CLIENTE CHAVE, D2.D2_LOJA LOJA, MAX(A1.A1_NOME) NOME "
+            cJoin   := " LEFT JOIN " + RetSqlName("SA1") + " A1 ON A1.A1_FILIAL = ? AND A1.A1_COD = D2.D2_CLIENTE AND A1.A1_LOJA = D2.D2_LOJA AND A1.D_E_L_E_T_ = ' ' "
+            cGroup  := " D2.D2_CLIENTE, D2.D2_LOJA "
+        case cDimension == "product"
+            cSelect := " D2.D2_COD CHAVE, ' ' LOJA, MAX(B1.B1_DESC) NOME "
+            cJoin   := " LEFT JOIN " + RetSqlName("SB1") + " B1 ON B1.B1_FILIAL = ? AND B1.B1_COD = D2.D2_COD AND B1.D_E_L_E_T_ = ' ' "
+            cGroup  := " D2.D2_COD "
+        case cDimension == "seller"
+            cSelect := " F2.F2_VEND1 CHAVE, ' ' LOJA, MAX(A3.A3_NOME) NOME "
+            cJoin   := " INNER JOIN " + RetSqlName("SF2") + " F2 ON F2.F2_FILIAL = D2.D2_FILIAL AND F2.F2_DOC = D2.D2_DOC AND F2.F2_SERIE = D2.D2_SERIE "
+            cJoin   += "   AND F2.F2_CLIENTE = D2.D2_CLIENTE AND F2.F2_LOJA = D2.D2_LOJA AND F2.D_E_L_E_T_ = ' ' "
+            cJoin   += " LEFT JOIN " + RetSqlName("SA3") + " A3 ON A3.A3_FILIAL = ? AND A3.A3_COD = F2.F2_VEND1 AND A3.D_E_L_E_T_ = ' ' "
+            cGroup  := " F2.F2_VEND1 "
+        otherwise // state
+            cSelect := " F2.F2_EST CHAVE, ' ' LOJA, MAX(F2.F2_EST) NOME "
+            cJoin   := " INNER JOIN " + RetSqlName("SF2") + " F2 ON F2.F2_FILIAL = D2.D2_FILIAL AND F2.F2_DOC = D2.D2_DOC AND F2.F2_SERIE = D2.D2_SERIE "
+            cJoin   += "   AND F2.F2_CLIENTE = D2.D2_CLIENTE AND F2.F2_LOJA = D2.D2_LOJA AND F2.D_E_L_E_T_ = ' ' "
+            cGroup  := " F2.F2_EST "
+    endCase
+
+    // O JOIN de cadastro (SA1/SB1/SA3) tem o primeiro bind: a filial do cadastro
+    oQuery := tdash.core.TDashQuery():new(;
+        " SELECT " + cSelect + ", SUM(D2.D2_VALBRUT) VALOR " + ;
+        ::salesFrom(cJoin) + ;
+        " GROUP BY " + cGroup + " ORDER BY SUM(D2.D2_VALBRUT) DESC ")
+
+    nBind := 1
+    do case
+        case cDimension == "customer"
+            oQuery:setString(nBind++, FWxFilial("SA1"))
+        case cDimension == "product"
+            oQuery:setString(nBind++, FWxFilial("SB1"))
+        case cDimension == "seller"
+            oQuery:setString(nBind++, FWxFilial("SA3"))
+    endCase
+    oQuery:setString(nBind++, FWxFilial("SF4"))
+    oQuery:setString(nBind++, FWxFilial("SD2"))
+    oQuery:setString(nBind++, DToS(dFrom))
+    oQuery:setString(nBind++, DToS(dTo))
+
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof()) .and. (nTop == 0 .or. Len(aRows) < nTop)
+            cLabel := AllTrim((cAlias)->NOME)
+            if Empty(cLabel)
+                cLabel := AllTrim((cAlias)->CHAVE)
+            endIf
+            if Empty(cLabel)
+                cLabel := "Não informado"
+            endIf
+            aAdd(aRows, { AllTrim((cAlias)->CHAVE) + AllTrim((cAlias)->LOJA), cLabel, (cAlias)->VALOR })
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+return aRows
+
+/*/{Protheus.doc} backlog
+Carteira de pedidos: saldo (C6_QTDVEN - C6_QTDEMP - C6_QTDENT) x C6_PRCVEN dos itens em aberto
+(regra confirmada: encerrado quando C6_BLQ = 'R', faturado >= vendido ou saldo zero).
+@type method
+@author TDash
+@since 20/10/2026
+@return numeric, valor da carteira
+/*/
+method backlog() as numeric class TDashFatRepository
+    local nTotal := 0 as numeric
+    local oQuery as object
+
+    oQuery := tdash.core.TDashQuery():new(;
+        " SELECT SUM((C6.C6_QTDVEN - C6.C6_QTDEMP - C6.C6_QTDENT) * C6.C6_PRCVEN) TOTAL " + ;
+        " FROM " + RetSqlName("SC6") + " C6 " + ::backlogWhere())
+    oQuery:setString(1, FWxFilial("SC6"))
+    if oQuery:open()
+        nTotal := ::numberOf(oQuery:getAlias(), "TOTAL")
+        oQuery:close()
+    endIf
+return nTotal
+
+/*/{Protheus.doc} backlogItems
+Itens da carteira, pela data de entrega, paginados.
+@type method
+@author TDash
+@since 20/10/2026
+@param nPage, numeric, página (a partir de 1)
+@param nPageSize, numeric, itens por página
+@return json, { items, hasNext, total }
+/*/
+method backlogItems(nPage as numeric, nPageSize as numeric) as json class TDashFatRepository
+    local jResult := jsonObject():new() as json
+    local jItem   as json
+    local aItems  := {} as array
+    local cQry    := "" as character
+    local cAlias  := "" as character
+    local nTotal  := 0 as numeric
+    local oQuery  as object
+
+    oQuery := tdash.core.TDashQuery():new(" SELECT COUNT(*) TOTAL FROM " + RetSqlName("SC6") + " C6 " + ::backlogWhere())
+    oQuery:setString(1, FWxFilial("SC6"))
+    if oQuery:open()
+        nTotal := ::numberOf(oQuery:getAlias(), "TOTAL")
+        oQuery:close()
+    endIf
+
+    cQry := " SELECT C6.C6_NUM NUM, C6.C6_ITEM ITEM, C6.C6_PRODUTO PRODUTO, C6.C6_ENTREG ENTREGA, "
+    cQry += " (C6.C6_QTDVEN - C6.C6_QTDEMP - C6.C6_QTDENT) SALDO, "
+    cQry += " (C6.C6_QTDVEN - C6.C6_QTDEMP - C6.C6_QTDENT) * C6.C6_PRCVEN VALOR, "
+    cQry += " A1.A1_NOME CLIENTE, B1.B1_DESC DESCRICAO "
+    cQry += " FROM " + RetSqlName("SC6") + " C6 "
+    cQry += " LEFT JOIN " + RetSqlName("SA1") + " A1 ON A1.A1_FILIAL = ? AND A1.A1_COD = C6.C6_CLI AND A1.A1_LOJA = C6.C6_LOJA AND A1.D_E_L_E_T_ = ' ' "
+    cQry += " LEFT JOIN " + RetSqlName("SB1") + " B1 ON B1.B1_FILIAL = ? AND B1.B1_COD = C6.C6_PRODUTO AND B1.D_E_L_E_T_ = ' ' "
+    cQry += ::backlogWhere()
+    cQry += " ORDER BY C6.C6_ENTREG, C6.C6_NUM, C6.C6_ITEM "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    oQuery:setString(1, FWxFilial("SA1"))
+    oQuery:setString(2, FWxFilial("SB1"))
+    oQuery:setString(3, FWxFilial("SC6"))
+
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        (cAlias)->(DbSkip((nPage - 1) * nPageSize))
+        while !(cAlias)->(Eof()) .and. Len(aItems) < nPageSize
+            jItem := jsonObject():new()
+            jItem["document"] := "Pedido " + AllTrim((cAlias)->NUM) + "/" + AllTrim((cAlias)->ITEM)
+            jItem["party"]    := AllTrim((cAlias)->CLIENTE)
+            jItem["product"]  := AllTrim((cAlias)->PRODUTO) + " " + AllTrim((cAlias)->DESCRICAO)
+            if Empty((cAlias)->ENTREGA)
+                jItem["dueDate"] := Nil
+            else
+                jItem["dueDate"] := Transform((cAlias)->ENTREGA, "@R 9999-99-99")
+            endIf
+            jItem["quantity"] := Round((cAlias)->SALDO, 2)
+            jItem["balance"]  := Round((cAlias)->VALOR, 2)
+            aAdd(aItems, jItem)
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+
+    jResult["items"]   := aItems
+    jResult["total"]   := nTotal
+    jResult["hasNext"] := (nPage * nPageSize) < nTotal
+return jResult
+
+/*/{Protheus.doc} resultRows
+Linhas do resultado (lucro bruto, lucro líquido e impostos) por dia: vendas (SD2 normais com TES que gera duplicata,
+por D2_EMISSAO) e devoluções (SD1 tipo D, por D1_DTDIGIT), com venda, custo, venda sem custo e cada imposto.
+Venda sem custo = D2_CUSTO1 zerado em TES que movimenta estoque (F4_ESTOQUE <> 'N'); a venda com TES que não
+movimenta estoque continua na venda e no lucro, mas não conta como sem custo.
+CBS e IBS vêm dos tributos genéricos (F2D, ligados ao item por D2_IDTRIB/D1_IDTRIB) e são separados pelo código do
+tributo na regra tributária (F2B_TRIB começando com CBS ou IBS). Sem as tabelas da reforma, CBS e IBS ficam zerados.
+A conta do resultado fica em tdash.fat.u_resultSum.
+@type method
+@author TDash
+@since 26/10/2026
+@param dFrom, date, início
+@param dTo, date, fim
+@return array, linhas (json) { day, kind (sale | return), revenue, cost, uncosted, icms, ipi, st, pis, cofins, iss, cbs, ibs }
+/*/
+method resultRows(dFrom as date, dTo as date) as array class TDashFatRepository
+    local aRows   := {} as array
+    local lReform := AliasInDic("F2D") .and. AliasInDic("F2B") as logical
+    local cQry    := "" as character
+    local nOffset := 0 as numeric
+    local oQuery  as object
+
+    // Vendas
+    cQry := " SELECT D2.D2_EMISSAO DIA, SUM(D2.D2_TOTAL) REVENUE, SUM(D2.D2_CUSTO1) COST, "
+    // Venda com TES que não movimenta estoque (energia, serviço, sucata) nunca tem custo médio: não é custo incompleto
+    cQry += " SUM(CASE WHEN D2.D2_CUSTO1 > 0 OR F4.F4_ESTOQUE = 'N' THEN 0 ELSE D2.D2_TOTAL END) UNCOSTED, "
+    cQry += " SUM(D2.D2_VALICM) ICMS, SUM(D2.D2_VALIPI) IPI, SUM(D2.D2_ICMSRET) ST, "
+    cQry += " SUM(D2.D2_VALIMP6) PIS, SUM(D2.D2_VALIMP5) COFINS, SUM(D2.D2_VALISS) ISS, "
+    if lReform
+        cQry += " SUM(COALESCE(T.CBS, 0)) CBS, SUM(COALESCE(T.IBS, 0)) IBS "
+        cQry += ::salesFrom(" LEFT JOIN (" + ::reformTaxes("SD2") + ") T ON T.F2D_IDREL = D2.D2_IDTRIB AND D2.D2_IDTRIB <> ' ' ")
+    else
+        cQry += " 0 CBS, 0 IBS "
+        cQry += ::salesFrom("")
+    endIf
+    cQry += " GROUP BY D2.D2_EMISSAO ORDER BY D2.D2_EMISSAO "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    nOffset := 0
+    if lReform
+        oQuery:setString(1, FWxFilial("F2B"))
+        oQuery:setString(2, FWxFilial("F2D"))
+        nOffset := 2
+    endIf
+    oQuery:setString(nOffset + 1, FWxFilial("SF4"))
+    oQuery:setString(nOffset + 2, FWxFilial("SD2"))
+    oQuery:setString(nOffset + 3, DToS(dFrom))
+    oQuery:setString(nOffset + 4, DToS(dTo))
+    ::readResultRows(oQuery, "sale", aRows)
+
+    // Devoluções
+    cQry := " SELECT D1.D1_DTDIGIT DIA, SUM(D1.D1_TOTAL) REVENUE, SUM(D1.D1_CUSTO) COST, 0 UNCOSTED, "
+    cQry += " SUM(D1.D1_VALICM) ICMS, SUM(D1.D1_VALIPI) IPI, SUM(D1.D1_ICMSRET) ST, "
+    cQry += " SUM(D1.D1_VALIMP6) PIS, SUM(D1.D1_VALIMP5) COFINS, SUM(D1.D1_VALISS) ISS, "
+    if lReform
+        cQry += " SUM(COALESCE(T.CBS, 0)) CBS, SUM(COALESCE(T.IBS, 0)) IBS "
+        cQry += " FROM " + RetSqlName("SD1") + " D1 "
+        cQry += " LEFT JOIN (" + ::reformTaxes("SD1") + ") T ON T.F2D_IDREL = D1.D1_IDTRIB AND D1.D1_IDTRIB <> ' ' "
+    else
+        cQry += " 0 CBS, 0 IBS "
+        cQry += " FROM " + RetSqlName("SD1") + " D1 "
+    endIf
+    cQry += " WHERE D1.D1_FILIAL = ? "
+    cQry += " AND D1.D1_TIPO = 'D' "
+    cQry += " AND D1.D1_DTDIGIT BETWEEN ? AND ? "
+    cQry += " AND D1.D_E_L_E_T_ = ' ' "
+    cQry += " GROUP BY D1.D1_DTDIGIT ORDER BY D1.D1_DTDIGIT "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    nOffset := 0
+    if lReform
+        oQuery:setString(1, FWxFilial("F2B"))
+        oQuery:setString(2, FWxFilial("F2D"))
+        nOffset := 2
+    endIf
+    oQuery:setString(nOffset + 1, FWxFilial("SD1"))
+    oQuery:setString(nOffset + 2, DToS(dFrom))
+    oQuery:setString(nOffset + 3, DToS(dTo))
+    ::readResultRows(oQuery, "return", aRows)
+return aRows
+
+/*/{Protheus.doc} reformTaxes
+Subconsulta com CBS e IBS por item (F2D_IDREL), somados da F2D (a CJ3 repete linhas). O tributo é reconhecido pelo
+código na regra tributária (F2B_TRIB: CBSFED, IBSEST, IBSMUN), porque os códigos TR0001, TR0002... mudam de cliente
+para cliente. Binds: filial da F2B e filial da F2D.
+@type method
+@author TDash
+@since 26/10/2026
+@param cTable, character, tabela de origem do item (SD2 ou SD1)
+@return character, SELECT com F2D_IDREL, CBS e IBS
+/*/
+method reformTaxes(cTable as character) as character class TDashFatRepository
+    local cQry := "" as character
+
+    cQry := " SELECT F2D.F2D_IDREL, "
+    cQry += " SUM(CASE WHEN F2B.F2B_TRIB LIKE 'CBS%' THEN F2D.F2D_VALOR ELSE 0 END) CBS, "
+    cQry += " SUM(CASE WHEN F2B.F2B_TRIB LIKE 'IBS%' THEN F2D.F2D_VALOR ELSE 0 END) IBS "
+    cQry += " FROM " + RetSqlName("F2D") + " F2D "
+    cQry += " INNER JOIN " + RetSqlName("F2B") + " F2B ON F2B.F2B_FILIAL = ? AND F2B.F2B_ID = F2D.F2D_IDCAD "
+    cQry += "   AND F2B.D_E_L_E_T_ = ' ' "
+    cQry += " WHERE F2D.F2D_FILIAL = ? "
+    cQry += " AND F2D.F2D_TABELA = '" + cTable + "' "
+    cQry += " AND F2D.F2D_DTEXCL = ' ' "
+    cQry += " AND F2D.D_E_L_E_T_ = ' ' "
+    cQry += " GROUP BY F2D.F2D_IDREL "
+return cQry
+
+/*/{Protheus.doc} readResultRows
+Lê a consulta do resultado e acrescenta as linhas em aRows.
+@type method
+@author TDash
+@since 26/10/2026
+@param oQuery, object, consulta pronta (TDashQuery)
+@param cKind, character, sale | return
+@param aRows, array, linhas (alterado)
+/*/
+method readResultRows(oQuery as object, cKind as character, aRows as array) class TDashFatRepository
+    local cAlias := "" as character
+    local jRow   as json
+
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof())
+            jRow := jsonObject():new()
+            jRow["day"]      := (cAlias)->DIA
+            jRow["kind"]     := cKind
+            jRow["revenue"]  := (cAlias)->REVENUE
+            jRow["cost"]     := (cAlias)->COST
+            jRow["uncosted"] := (cAlias)->UNCOSTED
+            jRow["icms"]     := (cAlias)->ICMS
+            jRow["ipi"]      := (cAlias)->IPI
+            jRow["st"]       := (cAlias)->ST
+            jRow["pis"]      := (cAlias)->PIS
+            jRow["cofins"]   := (cAlias)->COFINS
+            jRow["iss"]      := (cAlias)->ISS
+            jRow["cbs"]      := (cAlias)->CBS
+            jRow["ibs"]      := (cAlias)->IBS
+            aAdd(aRows, jRow)
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+return
+
+/*/{Protheus.doc} salesFrom
+FROM/WHERE do faturamento, com um JOIN opcional de cadastro antes do SF4.
+Binds: [filial do cadastro do JOIN], SF4 filial, SD2 filial, data inicial, data final.
+@type method
+@author TDash
+@since 20/10/2026
+@param cJoin, character, JOIN adicional (ou vazio)
+@return character, cláusulas FROM e WHERE
+/*/
+method salesFrom(cJoin as character) as character class TDashFatRepository
+    local cFrom := "" as character
+
+    cFrom := " FROM " + RetSqlName("SD2") + " D2 "
+    cFrom += cJoin
+    cFrom += " INNER JOIN " + RetSqlName("SF4") + " F4 ON F4.F4_FILIAL = ? AND F4.F4_CODIGO = D2.D2_TES "
+    cFrom += "   AND F4.F4_DUPLIC = 'S' AND F4.D_E_L_E_T_ = ' ' "
+    cFrom += " WHERE D2.D2_FILIAL = ? "
+    cFrom += " AND D2.D2_TIPO = 'N' "
+    cFrom += " AND D2.D2_EMISSAO BETWEEN ? AND ? "
+    cFrom += " AND D2.D_E_L_E_T_ = ' ' "
+return cFrom
+
+/*/{Protheus.doc} bindSales
+Binds de salesFrom sem JOIN de cadastro (posições 1 a 4).
+@type method
+@author TDash
+@since 20/10/2026
+/*/
+method bindSales(oQuery as object, dFrom as date, dTo as date) class TDashFatRepository
+    oQuery:setString(1, FWxFilial("SF4"))
+    oQuery:setString(2, FWxFilial("SD2"))
+    oQuery:setString(3, DToS(dFrom))
+    oQuery:setString(4, DToS(dTo))
+return
+
+/*/{Protheus.doc} backlogWhere
+WHERE da carteira em aberto. Bind: filial do SC6.
+@type method
+@author TDash
+@since 20/10/2026
+@return character, cláusula WHERE
+/*/
+method backlogWhere() as character class TDashFatRepository
+    local cWhere := "" as character
+
+    cWhere := " WHERE C6.C6_FILIAL = ? "
+    cWhere += " AND C6.C6_BLQ <> 'R' "
+    cWhere += " AND C6.C6_QTDENT < C6.C6_QTDVEN "
+    cWhere += " AND (C6.C6_QTDVEN - C6.C6_QTDEMP - C6.C6_QTDENT) > 0 "
+    cWhere += " AND C6.D_E_L_E_T_ = ' ' "
+return cWhere
+
+/*/{Protheus.doc} numberOf
+Valor numérico de um campo da linha atual; 0 quando nulo (ex.: SUM sem linhas).
+@type method
+@author TDash
+@since 20/10/2026
+@return numeric, valor ou 0
+/*/
+method numberOf(cAlias as character, cField as character) as numeric class TDashFatRepository
+    local nValue := 0 as numeric
+    local xValue
+
+    if !(cAlias)->(Eof())
+        xValue := (cAlias)->(FieldGet(FieldPos(cField)))
+        if valType(xValue) == "N"
+            nValue := xValue
+        endIf
+    endIf
+return nValue

@@ -1,0 +1,732 @@
+#include 'tlpp-core.th'
+#include 'totvs.ch'
+
+namespace tdash.fis
+
+/*/{Protheus.doc} TDashFisRepository
+Consultas dos indicadores de Livros Fiscais (SF3 livro por nota, SFT livro por item) e da centralização de débitos
+e créditos (também SD1 para o ISS retido e F2D/F2B para CBS e IBS).
+Notas canceladas (F3_DTCANC / FT_DTCANC preenchido) ficam fora de todos os totais, menos fis.cancelled.
+Entradas: CFOP iniciando com 1, 2 ou 3. Saídas: CFOP iniciando com 5, 6 ou 7. O período é a data de
+entrada/saída (F3_ENTRADA, FT_ENTRADA). Regras: docs/10-catalogo-de-indicadores.md (Livros Fiscais).
+@type class
+@author TDash
+@since 21/10/2026
+@version 1.0
+/*/
+class TDashFisRepository
+    public method new()
+
+    public method taxTotals(cTax as character, dFrom as date, dTo as date) as array
+    public method taxByDay(cTax as character, dFrom as date, dTo as date) as array
+    public method iss(dFrom as date, dTo as date) as numeric
+    public method sumField(cField as character, dFrom as date, dTo as date) as numeric
+    public method byCfop(dFrom as date, dTo as date) as array
+    public method byState(dFrom as date, dTo as date, lEntries as logical) as array
+    public method cancelled(dFrom as date, dTo as date) as numeric
+    public method cancelledItems(dFrom as date, dTo as date, nPage as numeric, nPageSize as numeric) as json
+    public method ledgerMonths(cFil as character, dFrom as date, dTo as date) as array
+    public method topParties(dFrom as date, dTo as date, nTop as numeric) as array
+    public method topNcm(dFrom as date, dTo as date) as array
+
+    private method taxSql(cTax as character, lByDay as logical) as character
+    private method taxTable(cTax as character) as character
+    private method cancelledFrom() as character
+    private method bindPeriod(oQuery as object, cTable as character, dFrom as date, dTo as date)
+    private method numberOf(cAlias as character, cField as character) as numeric
+    private method reformSql(cTable as character, cAlias as character, cDate as character, cIdTrib as character, cSuffix as character) as character
+    private method bindReform(oQuery as object, cTable as character, cFil as character, dFrom as date, dTo as date)
+    private method readLedger(oQuery as object, aFields as array, aMonths as array)
+endclass
+
+method new() class TDashFisRepository
+return self
+
+/*/{Protheus.doc} taxTotals
+Débito (saídas) e crédito (entradas) de um imposto no período.
+@type method
+@author TDash
+@since 21/10/2026
+@param cTax, character, icms | ipi | pis_cofins
+@param dFrom, date, início
+@param dTo, date, fim
+@return array, { débito, crédito }
+/*/
+method taxTotals(cTax as character, dFrom as date, dTo as date) as array class TDashFisRepository
+    local aTotals := { 0, 0 } as array
+    local cAlias  := "" as character
+    local oQuery  as object
+
+    oQuery := tdash.core.TDashQuery():new(::taxSql(cTax, .F.))
+    ::bindPeriod(oQuery, ::taxTable(cTax), dFrom, dTo)
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        aTotals[1] := ::numberOf(cAlias, "DEBITO")
+        aTotals[2] := ::numberOf(cAlias, "CREDITO")
+        oQuery:close()
+    endIf
+return aTotals
+
+/*/{Protheus.doc} taxByDay
+Débito e crédito de um imposto por dia (a API agrupa em semanas ou meses).
+@type method
+@author TDash
+@since 21/10/2026
+@param cTax, character, icms | ipi | pis_cofins
+@param dFrom, date, início
+@param dTo, date, fim
+@return array, { { data AAAAMMDD, débito, crédito }, ... }
+/*/
+method taxByDay(cTax as character, dFrom as date, dTo as date) as array class TDashFisRepository
+    local aRows  := {} as array
+    local cAlias := "" as character
+    local oQuery as object
+
+    oQuery := tdash.core.TDashQuery():new(::taxSql(cTax, .T.))
+    ::bindPeriod(oQuery, ::taxTable(cTax), dFrom, dTo)
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof())
+            aAdd(aRows, { (cAlias)->DIA, (cAlias)->DEBITO, (cAlias)->CREDITO })
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+return aRows
+
+/*/{Protheus.doc} iss
+ISS do período: soma de F3_VALICM das notas de serviço (F3_TIPO = 'S'), sem as canceladas.
+@type method
+@author TDash
+@since 21/10/2026
+@param dFrom, date, início (F3_ENTRADA)
+@param dTo, date, fim
+@return numeric, valor
+/*/
+method iss(dFrom as date, dTo as date) as numeric class TDashFisRepository
+    local nTotal := 0 as numeric
+    local cQry   := "" as character
+    local oQuery as object
+
+    cQry := " SELECT SUM(F3.F3_VALICM) TOTAL "
+    cQry += " FROM " + RetSqlName("SF3") + " F3 "
+    cQry += " WHERE F3.F3_FILIAL = ? "
+    cQry += " AND F3.F3_ENTRADA BETWEEN ? AND ? "
+    cQry += " AND F3.F3_DTCANC = ' ' "
+    cQry += " AND F3.F3_TIPO = 'S' "
+    cQry += " AND F3.D_E_L_E_T_ = ' ' "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    ::bindPeriod(oQuery, "SF3", dFrom, dTo)
+    if oQuery:open()
+        nTotal := ::numberOf(oQuery:getAlias(), "TOTAL")
+        oQuery:close()
+    endIf
+return nTotal
+
+/*/{Protheus.doc} sumField
+Soma de um campo do livro (F3_ICMSRET ou F3_DIFAL) no período, sem serviços e sem canceladas.
+Só aceita os dois campos conhecidos: o nome do campo nunca vem de fora.
+@type method
+@author TDash
+@since 21/10/2026
+@param cField, character, F3_ICMSRET | F3_DIFAL
+@param dFrom, date, início
+@param dTo, date, fim
+@return numeric, valor (0 para campo desconhecido)
+/*/
+method sumField(cField as character, dFrom as date, dTo as date) as numeric class TDashFisRepository
+    local nTotal := 0 as numeric
+    local cQry   := "" as character
+    local oQuery as object
+
+    if cField <> "F3_ICMSRET" .and. cField <> "F3_DIFAL"
+        return 0
+    endIf
+
+    cQry := " SELECT SUM(F3." + cField + ") TOTAL "
+    cQry += " FROM " + RetSqlName("SF3") + " F3 "
+    cQry += " WHERE F3.F3_FILIAL = ? "
+    cQry += " AND F3.F3_ENTRADA BETWEEN ? AND ? "
+    cQry += " AND F3.F3_DTCANC = ' ' "
+    cQry += " AND F3.F3_TIPO <> 'S' "
+    cQry += " AND F3.D_E_L_E_T_ = ' ' "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    ::bindPeriod(oQuery, "SF3", dFrom, dTo)
+    if oQuery:open()
+        nTotal := ::numberOf(oQuery:getAlias(), "TOTAL")
+        oQuery:close()
+    endIf
+return nTotal
+
+/*/{Protheus.doc} byCfop
+Valor contábil (F3_VALCONT) por CFOP no período, do maior para o menor, sem as canceladas.
+@type method
+@author TDash
+@since 21/10/2026
+@param dFrom, date, início
+@param dTo, date, fim
+@return array, { { chave, rótulo, valor }, ... }
+/*/
+method byCfop(dFrom as date, dTo as date) as array class TDashFisRepository
+    local aRows  := {} as array
+    local cQry   := "" as character
+    local cAlias := "" as character
+    local cCfop  := "" as character
+    local cLabel := "" as character
+    local oQuery as object
+
+    cQry := " SELECT F3.F3_CFO CHAVE, SUM(F3.F3_VALCONT) VALOR "
+    cQry += " FROM " + RetSqlName("SF3") + " F3 "
+    cQry += " WHERE F3.F3_FILIAL = ? "
+    cQry += " AND F3.F3_ENTRADA BETWEEN ? AND ? "
+    cQry += " AND F3.F3_DTCANC = ' ' "
+    cQry += " AND F3.D_E_L_E_T_ = ' ' "
+    cQry += " GROUP BY F3.F3_CFO ORDER BY SUM(F3.F3_VALCONT) DESC "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    ::bindPeriod(oQuery, "SF3", dFrom, dTo)
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof())
+            cCfop := AllTrim((cAlias)->CHAVE)
+            do case
+                case Empty(cCfop)
+                    cLabel := "Não informado"
+                case Left(cCfop, 1) $ "567"
+                    cLabel := "Saída " + Left(cCfop, 1) + "." + SubStr(cCfop, 2)
+                case Left(cCfop, 1) $ "123"
+                    cLabel := "Entrada " + Left(cCfop, 1) + "." + SubStr(cCfop, 2)
+                otherwise
+                    cLabel := cCfop
+            endCase
+            aAdd(aRows, { cCfop, cLabel, (cAlias)->VALOR })
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+return aRows
+
+/*/{Protheus.doc} byState
+Valor contábil das saídas (CFOP 5, 6 ou 7) ou das entradas (CFOP 1, 2 ou 3) por UF, do maior para o menor, sem as
+canceladas.
+@type method
+@author TDash
+@since 21/10/2026
+@param dFrom, date, início
+@param dTo, date, fim
+@param lEntries, logical, .T. entradas; .F. saídas
+@return array, { { chave, rótulo, valor }, ... }
+/*/
+method byState(dFrom as date, dTo as date, lEntries as logical) as array class TDashFisRepository
+    local aRows  := {} as array
+    local cQry   := "" as character
+    local cAlias := "" as character
+    local cState := "" as character
+    local oQuery as object
+
+    cQry := " SELECT F3.F3_ESTADO CHAVE, SUM(F3.F3_VALCONT) VALOR "
+    cQry += " FROM " + RetSqlName("SF3") + " F3 "
+    cQry += " WHERE F3.F3_FILIAL = ? "
+    cQry += " AND F3.F3_ENTRADA BETWEEN ? AND ? "
+    cQry += " AND F3.F3_DTCANC = ' ' "
+    if lEntries
+        cQry += " AND (F3.F3_CFO LIKE '1%' OR F3.F3_CFO LIKE '2%' OR F3.F3_CFO LIKE '3%') "
+    else
+        cQry += " AND (F3.F3_CFO LIKE '5%' OR F3.F3_CFO LIKE '6%' OR F3.F3_CFO LIKE '7%') "
+    endIf
+    cQry += " AND F3.D_E_L_E_T_ = ' ' "
+    cQry += " GROUP BY F3.F3_ESTADO ORDER BY SUM(F3.F3_VALCONT) DESC "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    ::bindPeriod(oQuery, "SF3", dFrom, dTo)
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof())
+            cState := AllTrim((cAlias)->CHAVE)
+            if Empty(cState)
+                aAdd(aRows, { "", "Não informado", (cAlias)->VALOR })
+            else
+                aAdd(aRows, { cState, cState, (cAlias)->VALOR })
+            endIf
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+return aRows
+
+/*/{Protheus.doc} cancelled
+Quantidade de notas fiscais canceladas no período (pela data de cancelamento, F3_DTCANC).
+@type method
+@author TDash
+@since 21/10/2026
+@param dFrom, date, início
+@param dTo, date, fim
+@return numeric, quantidade de notas
+/*/
+method cancelled(dFrom as date, dTo as date) as numeric class TDashFisRepository
+    local nTotal := 0 as numeric
+    local cQry   := "" as character
+    local oQuery as object
+
+    cQry := " SELECT COUNT(*) TOTAL FROM ( "
+    cQry += " SELECT F3.F3_NFISCAL, F3.F3_SERIE, F3.F3_CLIEFOR, F3.F3_LOJA "
+    cQry += ::cancelledFrom()
+    cQry += " GROUP BY F3.F3_NFISCAL, F3.F3_SERIE, F3.F3_CLIEFOR, F3.F3_LOJA ) CANCELADAS "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    ::bindPeriod(oQuery, "SF3", dFrom, dTo)
+    if oQuery:open()
+        nTotal := ::numberOf(oQuery:getAlias(), "TOTAL")
+        oQuery:close()
+    endIf
+return nTotal
+
+/*/{Protheus.doc} cancelledItems
+Notas canceladas no período, da mais recente para a mais antiga, paginadas.
+@type method
+@author TDash
+@since 21/10/2026
+@param dFrom, date, início (F3_DTCANC)
+@param dTo, date, fim
+@param nPage, numeric, página (a partir de 1)
+@param nPageSize, numeric, itens por página
+@return json, { items, hasNext, total }
+/*/
+method cancelledItems(dFrom as date, dTo as date, nPage as numeric, nPageSize as numeric) as json class TDashFisRepository
+    local jResult := jsonObject():new() as json
+    local jItem   as json
+    local aItems  := {} as array
+    local cQry    := "" as character
+    local cAlias  := "" as character
+    local nTotal  := 0 as numeric
+    local oQuery  as object
+
+    nTotal := ::cancelled(dFrom, dTo)
+
+    cQry := " SELECT F3.F3_NFISCAL NOTA, F3.F3_SERIE SERIE, F3.F3_CLIEFOR PARCEIRO, F3.F3_LOJA LOJA, "
+    cQry += " MAX(F3.F3_DTCANC) CANCELAMENTO, SUM(F3.F3_VALCONT) VALOR "
+    cQry += ::cancelledFrom()
+    cQry += " GROUP BY F3.F3_NFISCAL, F3.F3_SERIE, F3.F3_CLIEFOR, F3.F3_LOJA "
+    cQry += " ORDER BY MAX(F3.F3_DTCANC) DESC, F3.F3_NFISCAL "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    ::bindPeriod(oQuery, "SF3", dFrom, dTo)
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        (cAlias)->(DbSkip((nPage - 1) * nPageSize))
+        while !(cAlias)->(Eof()) .and. Len(aItems) < nPageSize
+            jItem := jsonObject():new()
+            jItem["document"]   := "NF " + AllTrim((cAlias)->NOTA) + "/" + AllTrim((cAlias)->SERIE)
+            jItem["party"]      := "Cliente/fornecedor " + AllTrim((cAlias)->PARCEIRO) + "-" + AllTrim((cAlias)->LOJA)
+            jItem["cancelDate"] := Transform((cAlias)->CANCELAMENTO, "@R 9999-99-99")
+            jItem["balance"]    := Round((cAlias)->VALOR, 2)
+            aAdd(aItems, jItem)
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+
+    jResult["items"]   := aItems
+    jResult["total"]   := nTotal
+    jResult["hasNext"] := (nPage * nPageSize) < nTotal
+return jResult
+
+/*/{Protheus.doc} ledgerMonths
+Débitos e créditos de todos os tributos por mês, de uma filial (centralização). Regras:
+- ICMS, ICMS-ST e IPI: livro por nota (SF3) sem as notas de serviço; saídas (CFOP 5, 6, 7) são débito e entradas
+  (CFOP 1, 2, 3) são crédito;
+- DIFAL e FCP: débito = DIFAL + FCP da UF de destino das saídas mais o ICMS complementar das entradas (F3_ICMSCOM);
+- ISS próprio: ISS das notas de serviço de saída (F3_VALICM com F3_TIPO = 'S');
+- PIS e COFINS: livro por item (SFT); débito nas saídas, crédito nas entradas com CST 50 a 66;
+- ISS retido: D1_VALISS das notas de entrada com ISS retido no livro (FT_RECISS = '1');
+- CBS e IBS: tributos genéricos (F2D + regra F2B), débito nas saídas (SD2) e crédito nas entradas (SD1). Sem as
+  tabelas da reforma no dicionário, ficam zerados.
+Notas canceladas ficam fora. O mês é o da entrada/saída no livro (notas de entrada pela digitação).
+@type method
+@author TDash
+@since 27/10/2026
+@param cFil, character, filial (cFilAnt para a filial do app)
+@param dFrom, date, início
+@param dTo, date, fim
+@return array, linhas por mês (tdash.fis.u_ledgerNewRow), em ordem
+/*/
+method ledgerMonths(cFil as character, dFrom as date, dTo as date) as array class TDashFisRepository
+    local aMonths := {} as array
+    local cOut    := " (F3.F3_CFO LIKE '5%' OR F3.F3_CFO LIKE '6%' OR F3.F3_CFO LIKE '7%') " as character
+    local cIn     := " (F3.F3_CFO LIKE '1%' OR F3.F3_CFO LIKE '2%' OR F3.F3_CFO LIKE '3%') " as character
+    local cQry    := "" as character
+    local oQuery  as object
+
+    // Livro por nota
+    cQry := " SELECT F3.F3_ENTRADA DIA, "
+    cQry += " SUM(CASE WHEN F3.F3_TIPO <> 'S' AND " + cOut + " THEN F3.F3_VALICM ELSE 0 END) ICMS_D, "
+    cQry += " SUM(CASE WHEN F3.F3_TIPO <> 'S' AND " + cIn + " THEN F3.F3_VALICM ELSE 0 END) ICMS_C, "
+    cQry += " SUM(CASE WHEN F3.F3_TIPO <> 'S' AND " + cOut + " THEN F3.F3_ICMSRET ELSE 0 END) ICMS_ST_D, "
+    cQry += " SUM(CASE WHEN F3.F3_TIPO <> 'S' AND " + cIn + " THEN F3.F3_ICMSRET ELSE 0 END) ICMS_ST_C, "
+    cQry += " SUM(CASE WHEN F3.F3_TIPO <> 'S' AND " + cOut + " THEN F3.F3_VALIPI ELSE 0 END) IPI_D, "
+    cQry += " SUM(CASE WHEN F3.F3_TIPO <> 'S' AND " + cIn + " THEN F3.F3_VALIPI ELSE 0 END) IPI_C, "
+    cQry += " SUM(CASE WHEN F3.F3_TIPO <> 'S' AND " + cOut + " THEN F3.F3_DIFAL + F3.F3_VFCPDIF "
+    cQry += "   WHEN F3.F3_TIPO <> 'S' AND " + cIn + " THEN F3.F3_ICMSCOM ELSE 0 END) DIFAL_D, "
+    cQry += " SUM(CASE WHEN F3.F3_TIPO = 'S' AND " + cOut + " THEN F3.F3_VALICM ELSE 0 END) ISS_D, "
+    cQry += " SUM(CASE WHEN " + cOut + " THEN F3.F3_VALCONT ELSE 0 END) OUTVALUE "
+    cQry += " FROM " + RetSqlName("SF3") + " F3 "
+    cQry += " WHERE F3.F3_FILIAL = ? "
+    cQry += " AND F3.F3_ENTRADA BETWEEN ? AND ? "
+    cQry += " AND F3.F3_DTCANC = ' ' "
+    cQry += " AND F3.D_E_L_E_T_ = ' ' "
+    cQry += " GROUP BY F3.F3_ENTRADA "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    oQuery:setString(1, FWxFilial("SF3", cFil))
+    oQuery:setString(2, DToS(dFrom))
+    oQuery:setString(3, DToS(dTo))
+    ::readLedger(oQuery, { "icms_d", "icms_c", "icms_st_d", "icms_st_c", "ipi_d", "ipi_c", "difal_d", "iss_d", "outValue" }, aMonths)
+
+    // Livro por item: PIS e COFINS (crédito só nas entradas com CST de crédito, 50 a 66)
+    cQry := " SELECT FT.FT_ENTRADA DIA, "
+    cQry += " SUM(CASE WHEN FT.FT_TIPOMOV = 'S' THEN FT.FT_VALPIS ELSE 0 END) PIS_D, "
+    cQry += " SUM(CASE WHEN FT.FT_TIPOMOV = 'E' AND FT.FT_CSTPIS BETWEEN '50' AND '66' THEN FT.FT_VALPIS ELSE 0 END) PIS_C, "
+    cQry += " SUM(CASE WHEN FT.FT_TIPOMOV = 'S' THEN FT.FT_VALCOF ELSE 0 END) COFINS_D, "
+    cQry += " SUM(CASE WHEN FT.FT_TIPOMOV = 'E' AND FT.FT_CSTCOF BETWEEN '50' AND '66' THEN FT.FT_VALCOF ELSE 0 END) COFINS_C "
+    cQry += " FROM " + RetSqlName("SFT") + " FT "
+    cQry += " WHERE FT.FT_FILIAL = ? "
+    cQry += " AND FT.FT_ENTRADA BETWEEN ? AND ? "
+    cQry += " AND FT.FT_DTCANC = ' ' "
+    cQry += " AND FT.D_E_L_E_T_ = ' ' "
+    cQry += " GROUP BY FT.FT_ENTRADA "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    oQuery:setString(1, FWxFilial("SFT", cFil))
+    oQuery:setString(2, DToS(dFrom))
+    oQuery:setString(3, DToS(dTo))
+    ::readLedger(oQuery, { "pis_d", "pis_c", "cofins_d", "cofins_c" }, aMonths)
+
+    // ISS retido: o valor fica no item da nota de entrada, a marca de retenção no livro por item
+    cQry := " SELECT D1.D1_DTDIGIT DIA, SUM(D1.D1_VALISS) ISS_RET_D "
+    cQry += " FROM " + RetSqlName("SD1") + " D1 "
+    cQry += " WHERE D1.D1_FILIAL = ? "
+    cQry += " AND D1.D1_DTDIGIT BETWEEN ? AND ? "
+    cQry += " AND D1.D1_VALISS > 0 "
+    cQry += " AND D1.D_E_L_E_T_ = ' ' "
+    cQry += " AND EXISTS ( SELECT 1 FROM " + RetSqlName("SFT") + " FT "
+    cQry += "   WHERE FT.FT_FILIAL = ? AND FT.FT_TIPOMOV = 'E' AND FT.FT_NFISCAL = D1.D1_DOC "
+    cQry += "   AND FT.FT_SERIE = D1.D1_SERIE AND FT.FT_CLIEFOR = D1.D1_FORNECE AND FT.FT_LOJA = D1.D1_LOJA "
+    cQry += "   AND FT.FT_RECISS = '1' AND FT.FT_DTCANC = ' ' AND FT.D_E_L_E_T_ = ' ' ) "
+    cQry += " GROUP BY D1.D1_DTDIGIT "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    oQuery:setString(1, FWxFilial("SD1", cFil))
+    oQuery:setString(2, DToS(dFrom))
+    oQuery:setString(3, DToS(dTo))
+    oQuery:setString(4, FWxFilial("SFT", cFil))
+    ::readLedger(oQuery, { "iss_ret_d" }, aMonths)
+
+    // CBS e IBS (reforma tributária)
+    if AliasInDic("F2D") .and. AliasInDic("F2B")
+        oQuery := tdash.core.TDashQuery():new(::reformSql("SD2", "D2", "D2_EMISSAO", "D2_IDTRIB", "_D"))
+        ::bindReform(oQuery, "SD2", cFil, dFrom, dTo)
+        ::readLedger(oQuery, { "cbs_d", "ibs_d" }, aMonths)
+
+        oQuery := tdash.core.TDashQuery():new(::reformSql("SD1", "D1", "D1_DTDIGIT", "D1_IDTRIB", "_C"))
+        ::bindReform(oQuery, "SD1", cFil, dFrom, dTo)
+        ::readLedger(oQuery, { "cbs_c", "ibs_c" }, aMonths)
+    endIf
+return aMonths
+
+/*/{Protheus.doc} reformSql
+Consulta de CBS e IBS por dia de uma tabela de itens (SD2 saídas ou SD1 entradas), pela regra tributária (F2B_TRIB
+começando com CBS ou IBS). Binds: filial F2B, filial do item, data inicial, data final, filial F2D.
+@type method
+@author TDash
+@since 27/10/2026
+@param cTable, character, SD2 | SD1
+@param cAlias, character, D2 | D1
+@param cDate, character, campo da data (D2_EMISSAO | D1_DTDIGIT)
+@param cIdTrib, character, campo de ligação com a F2D (D2_IDTRIB | D1_IDTRIB)
+@param cSuffix, character, _D (débito) | _C (crédito)
+@return character, SQL
+/*/
+method reformSql(cTable as character, cAlias as character, cDate as character, cIdTrib as character, cSuffix as character) as character class TDashFisRepository
+    local cQry := "" as character
+
+    cQry := " SELECT " + cAlias + "." + cDate + " DIA, "
+    cQry += " SUM(CASE WHEN F2B.F2B_TRIB LIKE 'CBS%' THEN F2D.F2D_VALOR ELSE 0 END) CBS" + cSuffix + ", "
+    cQry += " SUM(CASE WHEN F2B.F2B_TRIB LIKE 'IBS%' THEN F2D.F2D_VALOR ELSE 0 END) IBS" + cSuffix + " "
+    cQry += " FROM " + RetSqlName("F2D") + " F2D "
+    cQry += " INNER JOIN " + RetSqlName("F2B") + " F2B ON F2B.F2B_FILIAL = ? AND F2B.F2B_ID = F2D.F2D_IDCAD "
+    cQry += "   AND F2B.D_E_L_E_T_ = ' ' "
+    cQry += " INNER JOIN " + RetSqlName(cTable) + " " + cAlias + " ON " + cAlias + "." + cAlias + "_FILIAL = ? "
+    cQry += "   AND " + cAlias + "." + cIdTrib + " = F2D.F2D_IDREL AND " + cAlias + "." + cDate + " BETWEEN ? AND ? "
+    cQry += "   AND " + cAlias + ".D_E_L_E_T_ = ' ' "
+    cQry += " WHERE F2D.F2D_FILIAL = ? "
+    cQry += " AND F2D.F2D_TABELA = '" + cTable + "' "
+    cQry += " AND F2D.F2D_DTEXCL = ' ' "
+    cQry += " AND F2D.D_E_L_E_T_ = ' ' "
+    cQry += " GROUP BY " + cAlias + "." + cDate + " "
+return cQry
+
+/*/{Protheus.doc} bindReform
+Binds de reformSql.
+@type method
+@author TDash
+@since 27/10/2026
+/*/
+method bindReform(oQuery as object, cTable as character, cFil as character, dFrom as date, dTo as date) class TDashFisRepository
+    oQuery:setString(1, FWxFilial("F2B", cFil))
+    oQuery:setString(2, FWxFilial(cTable, cFil))
+    oQuery:setString(3, DToS(dFrom))
+    oQuery:setString(4, DToS(dTo))
+    oQuery:setString(5, FWxFilial("F2D", cFil))
+return
+
+/*/{Protheus.doc} readLedger
+Abre a consulta (coluna DIA + uma coluna por campo, com o nome do campo em maiúsculas) e soma cada dia no mês.
+@type method
+@author TDash
+@since 27/10/2026
+@param oQuery, object, consulta com os binds feitos
+@param aFields, array, campos de tdash.fis.u_ledgerFields lidos desta consulta
+@param aMonths, array, linhas por mês (alterado)
+/*/
+method readLedger(oQuery as object, aFields as array, aMonths as array) class TDashFisRepository
+    local jValues as json
+    local cAlias := "" as character
+    local nX     := 0 as numeric
+
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof())
+            jValues := jsonObject():new()
+            for nX := 1 to Len(aFields)
+                jValues[aFields[nX]] := ::numberOf(cAlias, Upper(aFields[nX]))
+            next nX
+            tdash.fis.u_ledgerAccumulate(aMonths, (cAlias)->DIA, jValues)
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+return
+
+/*/{Protheus.doc} topParties
+Clientes e fornecedores pelo total de tributos das notas (ICMS ou ISS, IPI, PIS, COFINS e ICMS-ST do livro por item),
+do maior para o menor. Saída normal é cliente e entrada normal é fornecedor; devolução e beneficiamento (FT_TIPO D
+ou B) invertem. Só as nTop primeiras linhas buscam o nome no cadastro; as demais vão para "Outros" na API.
+@type method
+@author TDash
+@since 27/10/2026
+@param dFrom, date, início
+@param dTo, date, fim
+@param nTop, numeric, quantidade de linhas com nome
+@return array, { { chave, rótulo, valor }, ... }
+/*/
+method topParties(dFrom as date, dTo as date, nTop as numeric) as array class TDashFisRepository
+    local aRows   := {} as array
+    local cQry    := "" as character
+    local cAlias  := "" as character
+    local cCode   := "" as character
+    local cName   := "" as character
+    local cKind   := " CASE WHEN (FT.FT_TIPOMOV = 'S' AND FT.FT_TIPO NOT IN ('D', 'B')) OR (FT.FT_TIPOMOV = 'E' AND FT.FT_TIPO IN ('D', 'B')) THEN 'C' ELSE 'F' END " as character
+    local oQuery  as object
+
+    cQry := " SELECT " + cKind + " TIPO, FT.FT_CLIEFOR CODIGO, "
+    cQry += " SUM(FT.FT_VALICM + FT.FT_VALIPI + FT.FT_VALPIS + FT.FT_VALCOF + FT.FT_ICMSRET) VALOR "
+    cQry += " FROM " + RetSqlName("SFT") + " FT "
+    cQry += " WHERE FT.FT_FILIAL = ? "
+    cQry += " AND FT.FT_ENTRADA BETWEEN ? AND ? "
+    cQry += " AND FT.FT_DTCANC = ' ' "
+    cQry += " AND FT.D_E_L_E_T_ = ' ' "
+    cQry += " GROUP BY " + cKind + ", FT.FT_CLIEFOR "
+    cQry += " HAVING SUM(FT.FT_VALICM + FT.FT_VALIPI + FT.FT_VALPIS + FT.FT_VALCOF + FT.FT_ICMSRET) > 0 "
+    cQry += " ORDER BY SUM(FT.FT_VALICM + FT.FT_VALIPI + FT.FT_VALPIS + FT.FT_VALCOF + FT.FT_ICMSRET) DESC "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    ::bindPeriod(oQuery, "SFT", dFrom, dTo)
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof())
+            cCode := (cAlias)->CODIGO
+            cName := ""
+            if Len(aRows) < nTop
+                if (cAlias)->TIPO == "C"
+                    cName := AllTrim(Posicione("SA1", 1, FWxFilial("SA1") + cCode, "A1_NOME"))
+                else
+                    cName := AllTrim(Posicione("SA2", 1, FWxFilial("SA2") + cCode, "A2_NOME"))
+                endIf
+            endIf
+            if Empty(cName)
+                if (cAlias)->TIPO == "C"
+                    cName := "Cliente " + AllTrim(cCode)
+                else
+                    cName := "Fornecedor " + AllTrim(cCode)
+                endIf
+            endIf
+            aAdd(aRows, { (cAlias)->TIPO + AllTrim(cCode), cName, (cAlias)->VALOR })
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+return aRows
+
+/*/{Protheus.doc} topNcm
+Classificações fiscais (NCM) das saídas pelo total de tributos (ICMS, IPI, PIS, COFINS e ICMS-ST do livro por item),
+do maior para o menor.
+@type method
+@author TDash
+@since 27/10/2026
+@param dFrom, date, início
+@param dTo, date, fim
+@return array, { { chave, rótulo, valor }, ... }
+/*/
+method topNcm(dFrom as date, dTo as date) as array class TDashFisRepository
+    local aRows  := {} as array
+    local cQry   := "" as character
+    local cAlias := "" as character
+    local cNcm   := "" as character
+    local oQuery as object
+
+    cQry := " SELECT FT.FT_POSIPI NCM, SUM(FT.FT_VALICM + FT.FT_VALIPI + FT.FT_VALPIS + FT.FT_VALCOF + FT.FT_ICMSRET) VALOR "
+    cQry += " FROM " + RetSqlName("SFT") + " FT "
+    cQry += " WHERE FT.FT_FILIAL = ? "
+    cQry += " AND FT.FT_ENTRADA BETWEEN ? AND ? "
+    cQry += " AND FT.FT_DTCANC = ' ' "
+    cQry += " AND FT.FT_TIPOMOV = 'S' "
+    cQry += " AND FT.D_E_L_E_T_ = ' ' "
+    cQry += " GROUP BY FT.FT_POSIPI "
+    cQry += " HAVING SUM(FT.FT_VALICM + FT.FT_VALIPI + FT.FT_VALPIS + FT.FT_VALCOF + FT.FT_ICMSRET) > 0 "
+    cQry += " ORDER BY SUM(FT.FT_VALICM + FT.FT_VALIPI + FT.FT_VALPIS + FT.FT_VALCOF + FT.FT_ICMSRET) DESC "
+
+    oQuery := tdash.core.TDashQuery():new(cQry)
+    ::bindPeriod(oQuery, "SFT", dFrom, dTo)
+    if oQuery:open()
+        cAlias := oQuery:getAlias()
+        while !(cAlias)->(Eof())
+            cNcm := AllTrim((cAlias)->NCM)
+            aAdd(aRows, { cNcm, tdash.fis.u_ncmLabel(cNcm), (cAlias)->VALOR })
+            (cAlias)->(DbSkip())
+        endDo
+        oQuery:close()
+    endIf
+return aRows
+
+/*/{Protheus.doc} taxSql
+Consulta de débito e crédito de um imposto (3 binds: filial, data inicial, data final).
+ICMS e IPI vêm da SF3 (sem notas de serviço); PIS e COFINS somados vêm da SFT pelo tipo de movimento.
+O nome do campo sai de uma lista fixa, nunca do pedido.
+@type method
+@author TDash
+@since 21/10/2026
+@param cTax, character, icms | ipi | pis_cofins
+@param lByDay, logical, .T. agrupa por dia (coluna DIA)
+@return character, SQL
+/*/
+method taxSql(cTax as character, lByDay as logical) as character class TDashFisRepository
+    local cSql   := "" as character
+    local cField := "F3_VALICM" as character
+    local cDay   := "" as character
+
+    if cTax == "pis_cofins"
+        if lByDay
+            cDay := " FT.FT_ENTRADA DIA, "
+        endIf
+        cSql := " SELECT " + cDay
+        cSql += " SUM(CASE WHEN FT.FT_TIPOMOV = 'S' THEN FT.FT_VALPIS + FT.FT_VALCOF ELSE 0 END) DEBITO, "
+        cSql += " SUM(CASE WHEN FT.FT_TIPOMOV = 'E' THEN FT.FT_VALPIS + FT.FT_VALCOF ELSE 0 END) CREDITO "
+        cSql += " FROM " + RetSqlName("SFT") + " FT "
+        cSql += " WHERE FT.FT_FILIAL = ? "
+        cSql += " AND FT.FT_ENTRADA BETWEEN ? AND ? "
+        cSql += " AND FT.FT_DTCANC = ' ' "
+        cSql += " AND FT.D_E_L_E_T_ = ' ' "
+        if lByDay
+            cSql += " GROUP BY FT.FT_ENTRADA ORDER BY FT.FT_ENTRADA "
+        endIf
+        return cSql
+    endIf
+
+    if cTax == "ipi"
+        cField := "F3_VALIPI"
+    endIf
+    if lByDay
+        cDay := " F3.F3_ENTRADA DIA, "
+    endIf
+    cSql := " SELECT " + cDay
+    cSql += " SUM(CASE WHEN (F3.F3_CFO LIKE '5%' OR F3.F3_CFO LIKE '6%' OR F3.F3_CFO LIKE '7%') THEN F3." + cField + " ELSE 0 END) DEBITO, "
+    cSql += " SUM(CASE WHEN (F3.F3_CFO LIKE '1%' OR F3.F3_CFO LIKE '2%' OR F3.F3_CFO LIKE '3%') THEN F3." + cField + " ELSE 0 END) CREDITO "
+    cSql += " FROM " + RetSqlName("SF3") + " F3 "
+    cSql += " WHERE F3.F3_FILIAL = ? "
+    cSql += " AND F3.F3_ENTRADA BETWEEN ? AND ? "
+    cSql += " AND F3.F3_DTCANC = ' ' "
+    cSql += " AND F3.F3_TIPO <> 'S' "
+    cSql += " AND F3.D_E_L_E_T_ = ' ' "
+    if lByDay
+        cSql += " GROUP BY F3.F3_ENTRADA ORDER BY F3.F3_ENTRADA "
+    endIf
+return cSql
+
+/*/{Protheus.doc} taxTable
+Tabela de origem do imposto (para a filial do bind).
+@type method
+@author TDash
+@since 21/10/2026
+@param cTax, character, icms | ipi | pis_cofins
+@return character, SFT para PIS/COFINS; SF3 nos demais
+/*/
+method taxTable(cTax as character) as character class TDashFisRepository
+    local cTable := "SF3" as character
+
+    if cTax == "pis_cofins"
+        cTable := "SFT"
+    endIf
+return cTable
+
+/*/{Protheus.doc} cancelledFrom
+FROM/WHERE das notas canceladas (alias F3). Binds: filial, data inicial, data final (F3_DTCANC).
+@type method
+@author TDash
+@since 21/10/2026
+@return character, cláusulas
+/*/
+method cancelledFrom() as character class TDashFisRepository
+    local cFrom := "" as character
+
+    cFrom := " FROM " + RetSqlName("SF3") + " F3 "
+    cFrom += " WHERE F3.F3_FILIAL = ? "
+    cFrom += " AND F3.F3_DTCANC BETWEEN ? AND ? "
+    cFrom += " AND F3.D_E_L_E_T_ = ' ' "
+return cFrom
+
+/*/{Protheus.doc} bindPeriod
+Binds filial + período (posições 1 a 3) de qualquer consulta deste repositório.
+@type method
+@author TDash
+@since 21/10/2026
+@param oQuery, object, consulta
+@param cTable, character, tabela da filial (SF3 ou SFT)
+@param dFrom, date, início
+@param dTo, date, fim
+/*/
+method bindPeriod(oQuery as object, cTable as character, dFrom as date, dTo as date) class TDashFisRepository
+    oQuery:setString(1, FWxFilial(cTable))
+    oQuery:setString(2, DToS(dFrom))
+    oQuery:setString(3, DToS(dTo))
+return
+
+/*/{Protheus.doc} numberOf
+Valor numérico de um campo da linha atual; 0 quando nulo (ex.: SUM sem linhas).
+@type method
+@author TDash
+@since 21/10/2026
+@return numeric, valor ou 0
+/*/
+method numberOf(cAlias as character, cField as character) as numeric class TDashFisRepository
+    local nValue := 0 as numeric
+    local xValue
+
+    if !(cAlias)->(Eof())
+        xValue := (cAlias)->(FieldGet(FieldPos(cField)))
+        if valType(xValue) == "N"
+            nValue := xValue
+        endIf
+    endIf
+return nValue

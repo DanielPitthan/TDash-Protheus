@@ -1,0 +1,39 @@
+{
+  "title": "Painel de exemplo · 01/10/2026 a 23/10/2026",
+  "ttl": 60,
+  "generatedAt": "2026-10-23T14:32:05",
+  "widgets": [
+    { "type": "kpi", "name": "Faturado", "value": 1284500.75, "target": 1500000, "unit": "BRL", "direction": "up_is_good" },
+    { "type": "kpi", "name": "Devoluções", "value": 3.2, "target": 2, "unit": "PCT", "direction": "down_is_good" },
+    { "type": "kpi", "name": "Pedidos em aberto", "value": 148, "unit": "COUNT" },
+    {
+      "type": "columnChart", "name": "Faturado x Devolvido x Pendentes",
+      "axisX": "Mês", "axisY": "R$ mil", "unit": "QTY",
+      "categories": ["Mai", "Jun", "Jul", "Ago", "Set", "Out"],
+      "series": [
+        { "name": "Faturado", "data": [44, 55, 57, 56, 61, 58] },
+        { "name": "Devolvido", "data": [76, 85, 101, 98, 87, 105] },
+        { "name": "Pendentes", "data": [35, 41, 36, 26, 45, 48] }
+      ]
+    },
+    {
+      "type": "barChart", "name": "Vendas por vendedor",
+      "axisX": "Mês", "axisY": "R$", "unit": "BRL",
+      "categories": ["Ago", "Set", "Out"],
+      "series": [
+        { "name": "João", "data": [44000, 55000, 57000] },
+        { "name": "Maria", "data": [76000, 85000, 101000] },
+        { "name": "Manuel", "data": [35000, 41000, 36000] }
+      ]
+    },
+    {
+      "type": "table", "name": "Maiores clientes",
+      "columns": [ { "label": "Cliente", "unit": "" }, { "label": "Pedidos", "unit": "COUNT" }, { "label": "Valor", "unit": "BRL" } ],
+      "data": [
+        ["ACME INDÚSTRIA LTDA", 12, 182340.5],
+        ["COMERCIAL BOA VISTA S/A", 8, 96500],
+        ["DISTRIBUIDORA SUL LTDA", 5, 41230.9]
+      ]
+    }
+  ]
+}

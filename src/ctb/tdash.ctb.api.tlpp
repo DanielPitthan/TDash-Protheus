@@ -1,0 +1,344 @@
+#include 'tlpp-core.th'
+#include 'tlpp-rest.th'
+#include 'totvs.ch'
+
+// Validade das respostas (segundos): operacional, tático, estratégico
+#define TTL_OP  300
+#define TTL_TAT 1800
+#define TTL_EST 43200
+
+#define DEFAULT_PAGE_SIZE 50
+
+/*/{Protheus.doc} TDashCtbApi
+APIs de negócio da Contabilidade para o TDash: DRE e Balanço pela Visão Gerencial escolhida no app.
+Rotas: catalog, breakdown/:id (demonstrações) e list/:id (visões e linhas de apoio), prefixo /tdash/v1/ctb.
+A visão vem no parâmetro view (3 caracteres, existente na CVE da filial); sem ela, ou com visão desconhecida,
+a resposta é 422 (TDASH-422-CONFIG). Indicadores e regras: docs/10-catalogo-de-indicadores.md (seção Contabilidade).
+Formato das respostas (o que o app espera): docs/02-contrato-de-resposta.md.
+@type class
+@author TDash
+@since 21/10/2026
+@version 1.0
+/*/
+namespace tdash.ctb
+
+class TDashCtbApi
+    public method new()
+
+    @Get("/tdash/v1/ctb/catalog")
+    public method getCatalog()
+
+    @Get("/tdash/v1/ctb/breakdown/:id")
+    public method getBreakdown()
+
+    @Get("/tdash/v1/ctb/list/:id")
+    public method getList()
+
+    private method configError(cMessage as character)
+endclass
+
+method new() class TDashCtbApi
+return self
+
+/*/{Protheus.doc} getCatalog
+GET /tdash/v1/ctb/catalog
+@type method
+@author TDash
+@since 21/10/2026
+@return logical, sempre .T.
+/*/
+method getCatalog() class TDashCtbApi
+    local oHelper := tdash.core.TDashResponseHelper():new() as object
+    local jBody   := jsonObject():new() as json
+
+    jBody["items"] := tdash.core.u_catalogItems(ctbCatalog())
+    oHelper:setCacheHeaders(TTL_EST)
+    oRest:setResponse(oHelper:getResponse(jBody))
+return .T.
+
+/*/{Protheus.doc} getBreakdown
+GET /tdash/v1/ctb/breakdown/ctb.income_statement?view=100&dateFrom&dateTo&compare=none|prev|yoy
+GET /tdash/v1/ctb/breakdown/ctb.balance_sheet?view=003&dateTo&compare=none|prev|yoy
+DRE: movimento do período, sem lançamentos de apuração. Balanço: saldo acumulado até a data final.
+Os saldos são mensais: o período vale por meses inteiros (u_monthPeriod) e a resposta traz as datas usadas
+(dateFrom, dateTo e, com comparação, compareFrom e compareTo, em AAAA-MM-DD).
+Cada item traz o nível na hierarquia, o tipo (detail, subtotal, total) e, com comparação, o valor anterior.
+@type method
+@author TDash
+@since 21/10/2026
+@return logical, sempre .T.
+/*/
+method getBreakdown() class TDashCtbApi
+    local oRequest := tdash.core.TDashRequest():new() as object
+    local oHelper  := tdash.core.TDashResponseHelper():new() as object
+    local oPeriod  := tdash.core.TDashPeriod():new() as object
+    local oRepo    := TDashCtbRepository():new() as object
+    local jBody    := jsonObject():new() as json
+    local jItem    as json
+    local aDef     := {} as array
+    local aLines   := {} as array
+    local aValues  := {} as array
+    local aPrev    := {} as array
+    local aItems   := {} as array
+    local aWarning := {} as array
+    local aMonths  := {} as array
+    local cId      := oRequest:path("id") as character
+    local cView    := AllTrim(oRequest:query("view")) as character
+    local cMode    := "movement" as character
+    local cKind    := "" as character
+    local lFound   := .F. as logical
+    local nUnsup   := 0 as numeric
+    local nX       := 0 as numeric
+
+    aDef := tdash.core.u_findIndicator(ctbCatalog(), cId, "breakdown")
+    if Len(aDef) == 0
+        oHelper:notFound(cId, "ctb")
+        return .T.
+    endIf
+
+    if !tdash.core.u_isSafeCode(cView, 3)
+        ::configError("Escolha a visão gerencial nas Configurações do app.")
+        return .T.
+    endIf
+
+    if !oPeriod:fromQuery(oRequest:query("dateFrom"), oRequest:query("dateTo"), oRequest:query("compare"), Date())
+        oHelper:badRequest(oPeriod:cError)
+        return .T.
+    endIf
+
+    if cId == "ctb.balance_sheet"
+        cMode := "balance"
+    endIf
+
+    TRY
+        lFound := oRepo:viewExists(cView)
+        if !lFound
+            ::configError("Visão gerencial não encontrada na filial: " + cView)
+        else
+            aLines  := oRepo:viewLines(cView)
+            aMonths := tdash.ctb.u_monthPeriod(oPeriod:dFrom, oPeriod:dTo, oPeriod:cCompare)
+            aValues := statementValues(oRepo, aLines, cView, cMode, aMonths[1], aMonths[2])
+            if oPeriod:hasCompare()
+                aPrev := statementValues(oRepo, aLines, cView, cMode, aMonths[3], aMonths[4])
+            endIf
+
+            for nX := 1 to Len(aLines)
+                do case
+                    case aLines[nX][4] <> "1"
+                        cKind := "detail"
+                    case aLines[nX][5] == "4"
+                        cKind := "total"
+                    otherwise
+                        cKind := "subtotal"
+                endCase
+
+                jItem := jsonObject():new()
+                jItem["key"]   := aLines[nX][1]
+                jItem["label"] := aLines[nX][3]
+                jItem["value"] := Round(aValues[nX][2], 2)
+                jItem["share"] := 0
+                jItem["level"] := aValues[nX][3]
+                jItem["kind"]  := cKind
+                if Len(aPrev) > 0
+                    jItem["previous"] := Round(aPrev[nX][2], 2)
+                endIf
+                aAdd(aItems, jItem)
+            next nX
+
+            nUnsup := oRepo:unsupportedLines(cView)
+            if nUnsup > 0
+                aAdd(aWarning, cValToChar(nUnsup) + " linha(s) usam item contábil ou classe de valor, que ainda não são calculados; os totais podem divergir do relatório do Protheus.")
+            endIf
+
+            jBody["id"]          := aDef[1]
+            jBody["unit"]        := aDef[4]
+            jBody["dateFrom"]    := isoDate(aMonths[1])
+            jBody["dateTo"]      := isoDate(aMonths[2])
+            if oPeriod:hasCompare()
+                jBody["compareFrom"] := isoDate(aMonths[3])
+                jBody["compareTo"]   := isoDate(aMonths[4])
+            endIf
+            jBody["items"]       := aItems
+            jBody["warnings"]    := aWarning
+            jBody["generatedAt"] := oHelper:timestamp()
+            jBody["ttl"]         := aDef[6]
+
+            oHelper:setCacheHeaders(aDef[6])
+            oRest:setResponse(oHelper:getResponse(jBody))
+        endIf
+    CATCH oError
+        oHelper:serverError("TDashCtbApi:breakdown", oError:description)
+    ENDTRY
+return .T.
+
+/*/{Protheus.doc} getList
+GET /tdash/v1/ctb/list/ctb.views?page=1&pageSize=50
+GET /tdash/v1/ctb/list/ctb.view_lines?view=100
+Apoio às Configurações do app: visões gerenciais calculáveis da filial e as linhas de uma visão.
+@type method
+@author TDash
+@since 21/10/2026
+@return logical, sempre .T.
+/*/
+method getList() class TDashCtbApi
+    local oRequest  := tdash.core.TDashRequest():new() as object
+    local oHelper   := tdash.core.TDashResponseHelper():new() as object
+    local oRepo     := TDashCtbRepository():new() as object
+    local jBody     := jsonObject():new() as json
+    local jItem     as json
+    local aDef      := {} as array
+    local aColumns  := {} as array
+    local aSource   := {} as array
+    local aItems    := {} as array
+    local cId       := oRequest:path("id") as character
+    local cView     := AllTrim(oRequest:query("view")) as character
+    local cType     := "" as character
+    local nPage     := 0 as numeric
+    local nPageSize := 0 as numeric
+    local lFound    := .T. as logical
+    local nFirst    := 0 as numeric
+    local nX        := 0 as numeric
+
+    aDef := tdash.core.u_findIndicator(ctbCatalog(), cId, "list")
+    if Len(aDef) == 0
+        oHelper:notFound(cId, "ctb")
+        return .T.
+    endIf
+
+    nPage     := tdash.core.u_parseInt(oRequest:query("page"), 1, 1, 100000)
+    nPageSize := tdash.core.u_parseInt(oRequest:query("pageSize"), DEFAULT_PAGE_SIZE, 1, 100)
+    if nPage < 0 .or. nPageSize < 0
+        oHelper:badRequest("page deve ser maior que zero e pageSize entre 1 e 100.")
+        return .T.
+    endIf
+
+    if cId == "ctb.view_lines" .and. !tdash.core.u_isSafeCode(cView, 3)
+        oHelper:badRequest("Informe a visão em view (3 caracteres).")
+        return .T.
+    endIf
+
+    TRY
+        if cId == "ctb.views"
+            aAdd(aColumns, tdash.core.u_jsonColumn("document", "Visão", "text"))
+            aAdd(aColumns, tdash.core.u_jsonColumn("party", "Descrição", "text"))
+            aSource := oRepo:views()
+        else
+            lFound := oRepo:viewExists(cView)
+            aAdd(aColumns, tdash.core.u_jsonColumn("document", "Linha", "text"))
+            aAdd(aColumns, tdash.core.u_jsonColumn("party", "Descrição", "text"))
+            aAdd(aColumns, tdash.core.u_jsonColumn("kind", "Tipo", "text"))
+            if lFound
+                aSource := oRepo:viewLines(cView)
+            endIf
+        endIf
+
+        if !lFound
+            ::configError("Visão gerencial não encontrada na filial: " + cView)
+        else
+            nFirst := ((nPage - 1) * nPageSize) + 1
+            for nX := nFirst to Min(Len(aSource), nFirst + nPageSize - 1)
+                jItem := jsonObject():new()
+                if cId == "ctb.views"
+                    jItem["document"] := aSource[nX][1]
+                    jItem["party"]    := aSource[nX][2]
+                else
+                    do case
+                        case aSource[nX][4] <> "1"
+                            cType := "Analítica"
+                        case aSource[nX][5] == "4"
+                            cType := "Total geral"
+                        otherwise
+                            cType := "Subtotal"
+                    endCase
+                    jItem["document"] := aSource[nX][1]
+                    jItem["party"]    := aSource[nX][3]
+                    jItem["kind"]     := cType
+                endIf
+                aAdd(aItems, jItem)
+            next nX
+
+            jBody["columns"] := aColumns
+            jBody["items"]   := aItems
+            jBody["total"]   := Len(aSource)
+            jBody["hasNext"] := (nPage * nPageSize) < Len(aSource)
+
+            oHelper:setCacheHeaders(aDef[6])
+            oRest:setResponse(oHelper:getResponse(jBody))
+        endIf
+    CATCH oError
+        oHelper:serverError("TDashCtbApi:list", oError:description)
+    ENDTRY
+return .T.
+
+/*/{Protheus.doc} configError
+Responde 422: a visão gerencial não foi escolhida ou não existe na filial.
+@type method
+@author TDash
+@since 21/10/2026
+@param cMessage, character, o que o usuário precisa fazer
+/*/
+method configError(cMessage as character) class TDashCtbApi
+    local oHelper := tdash.core.TDashResponseHelper():new() as object
+
+    oRest:setStatusCode(422)
+    oRest:setResponse(oHelper:getErrorResponse("TDASH-422-CONFIG", cMessage, "Configure a visão em Configurações > Parâmetros dos indicadores."))
+return
+
+/*/{Protheus.doc} statementValues
+Valor, na natureza da linha, de cada linha da visão: saldo das analíticas totalizado pelas sintéticas.
+@type static function
+@author TDash
+@since 21/10/2026
+@param oRepo, object, repositório
+@param aLines, array, linhas da visão (viewLines)
+@param cView, character, código da visão
+@param cMode, character, movement | balance
+@param dFrom, date, início (só movement)
+@param dTo, date, fim ou data do saldo
+@return array, { { chave, valor, nível } } na ordem das linhas
+/*/
+static function statementValues(oRepo as object, aLines as array, cView as character, cMode as character, dFrom as date, dTo as date) as array
+    local aBalances := oRepo:accountBalances(cView, cMode, dFrom, dTo) as array
+    local aInput    := {} as array
+    local nOwn      := 0 as numeric
+    local nPos      := 0 as numeric
+    local nX        := 0 as numeric
+
+    for nX := 1 to Len(aLines)
+        nOwn := 0
+        nPos := AScan(aBalances, {|x| x[1] == aLines[nX][1]})
+        if nPos > 0
+            if aLines[nX][6] == "2"
+                nOwn := aBalances[nPos][3] - aBalances[nPos][2]
+            else
+                nOwn := aBalances[nPos][2] - aBalances[nPos][3]
+            endIf
+        endIf
+        aAdd(aInput, { aLines[nX][1], aLines[nX][2], aLines[nX][4], aLines[nX][6], nOwn })
+    next nX
+return tdash.ctb.u_rollup(aInput)
+
+/*/{Protheus.doc} isoDate
+Data no formato AAAA-MM-DD.
+@type static function
+@author TDash
+@since 21/10/2026
+@param dDate, date, data
+@return character, data formatada
+/*/
+static function isoDate(dDate as date) as character
+return Transform(DToS(dDate), "@R 9999-99-99")
+
+/*/{Protheus.doc} ctbCatalog
+Catálogo da Contabilidade: { id, tipos, título, unidade, sentido, ttl }.
+@type static function
+@author TDash
+@since 21/10/2026
+@return array, indicadores
+/*/
+static function ctbCatalog() as array
+return {;
+    { "ctb.views",            { "list" },      "Visões gerenciais",     "COUNT", "neutral", TTL_EST },;
+    { "ctb.view_lines",       { "list" },      "Linhas da visão",       "COUNT", "neutral", TTL_EST },;
+    { "ctb.income_statement", { "breakdown" }, "DRE",                   "BRL",   "neutral", TTL_EST },;
+    { "ctb.balance_sheet",    { "breakdown" }, "Balanço patrimonial",   "BRL",   "neutral", TTL_EST } }

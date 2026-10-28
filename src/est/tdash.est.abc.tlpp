@@ -1,0 +1,52 @@
+#include 'tlpp-core.th'
+#include 'totvs.ch'
+
+namespace tdash.est
+
+/*/{Protheus.doc} u_abcClassify
+Classifica valores de estoque em A, B e C pela participação acumulada (80% / 15% / 5%).
+O item entra na classe pela participação acumulada ANTES dele: abaixo de 80% é A, abaixo de 95% é B,
+o restante é C. Assim o maior item é sempre A. Valores zerados ou negativos são ignorados.
+@type user function
+@author TDash
+@since 21/10/2026
+@param aValues, array, valores (numéricos) em qualquer ordem
+@return array, { { qtd. A, valor A }, { qtd. B, valor B }, { qtd. C, valor C } }
+/*/
+User Function abcClassify(aValues as array) as array
+    local aClasses := { { 0, 0 }, { 0, 0 }, { 0, 0 } } as array
+    local aSorted  := {} as array
+    local nTotal   := 0 as numeric
+    local nAccum   := 0 as numeric
+    local nShare   := 0 as numeric
+    local nClass   := 0 as numeric
+    local nX       := 0 as numeric
+
+    for nX := 1 to Len(aValues)
+        if aValues[nX] > 0
+            aAdd(aSorted, aValues[nX])
+            nTotal += aValues[nX]
+        endIf
+    next nX
+
+    if nTotal == 0
+        return aClasses
+    endIf
+
+    aSort(aSorted, , , {|a, b| a > b})
+
+    for nX := 1 to Len(aSorted)
+        nShare := nAccum / nTotal
+        if nShare < 0.80
+            nClass := 1
+        elseIf nShare < 0.95
+            nClass := 2
+        else
+            nClass := 3
+        endIf
+
+        aClasses[nClass][1] += 1
+        aClasses[nClass][2] += aSorted[nX]
+        nAccum += aSorted[nX]
+    next nX
+return aClasses

@@ -1,0 +1,464 @@
+#include 'tlpp-core.th'
+#include 'tlpp-rest.th'
+#include 'totvs.ch'
+
+// Validade das respostas (segundos): operacional, tático, estratégico
+#define TTL_OP  300
+#define TTL_TAT 1800
+#define TTL_EST 43200
+
+#define DEFAULT_DUE_DAYS  30
+#define DEFAULT_LATE_DAYS 30
+#define DEFAULT_TOP       10
+#define DEFAULT_PAGE_SIZE 20
+
+/*/{Protheus.doc} TDashFinApi
+APIs de negócio do Financeiro para o TDash.
+Rotas: catalog, kpis, series/:id, breakdown/:id, list/:id (prefixo /tdash/v1/fin).
+Os indicadores fin.party_* (posição de um cliente ou fornecedor) são atendidos por TDashFinParty.
+Indicadores e regras: docs/10-catalogo-de-indicadores.md (seção Financeiro).
+Formato das respostas (o que o app espera): docs/02-contrato-de-resposta.md.
+@type class
+@author TDash
+@since 20/10/2026
+@version 1.0
+/*/
+namespace tdash.fin
+
+class TDashFinApi
+    public method new()
+
+    @Get("/tdash/v1/fin/catalog")
+    public method getCatalog()
+
+    @Get("/tdash/v1/fin/kpis")
+    public method getKpis()
+
+    @Get("/tdash/v1/fin/series/:id")
+    public method getSeries()
+
+    @Get("/tdash/v1/fin/breakdown/:id")
+    public method getBreakdown()
+
+    @Get("/tdash/v1/fin/list/:id")
+    public method getList()
+
+    private method kpiValue(cId as character, dFrom as date, dTo as date, dToday as date) as numeric
+endclass
+
+method new() class TDashFinApi
+return self
+
+/*/{Protheus.doc} getCatalog
+GET /tdash/v1/fin/catalog
+@type method
+@author TDash
+@since 20/10/2026
+@return logical, sempre .T.
+/*/
+method getCatalog() class TDashFinApi
+    local oHelper  := tdash.core.TDashResponseHelper():new() as object
+    local jBody    := jsonObject():new() as json
+    local aCatalog := aClone(finCatalog()) as array
+    local aParty   := tdash.fin.u_partyCatalog() as array
+    local nX       := 0 as numeric
+
+    for nX := 1 to Len(aParty)
+        aAdd(aCatalog, aParty[nX])
+    next nX
+    jBody["items"] := tdash.core.u_catalogItems(aCatalog)
+    oHelper:setCacheHeaders(TTL_EST)
+    oRest:setResponse(oHelper:getResponse(jBody))
+return .T.
+
+/*/{Protheus.doc} getKpis
+GET /tdash/v1/fin/kpis?ids=a,b&dateFrom=AAAAMMDD&dateTo=AAAAMMDD&compare=none|prev|yoy
+Saldos (a receber, a pagar, bancário) são posição de hoje e não têm comparação; prazos médios
+(PMR/PMP) usam o período e aceitam comparação.
+@type method
+@author TDash
+@since 20/10/2026
+@return logical, sempre .T.
+/*/
+method getKpis() class TDashFinApi
+    local oRequest := tdash.core.TDashRequest():new() as object
+    local oHelper  := tdash.core.TDashResponseHelper():new() as object
+    local oParty   as object
+    local oPeriod  := tdash.core.TDashPeriod():new() as object
+    local jBody    := jsonObject():new() as json
+    local aIds     := {} as array
+    local aItems   := {} as array
+    local aDef     := {} as array
+    local dToday   := Date() as date
+    local lCompare := .F. as logical
+    local nTtl     := TTL_EST as numeric
+    local nValue   := 0 as numeric
+    local nPrev    := 0 as numeric
+    local nX       := 0 as numeric
+
+    aIds := StrTokArr2(oRequest:query("ids"), ",", .F.)
+    if Len(aIds) == 0 .or. Len(aIds) > 20
+        oHelper:badRequest("Informe de 1 a 20 indicadores em ids.")
+        return .T.
+    endIf
+
+    // Posição de cliente ou fornecedor: todos os ids precisam ser fin.party_*
+    if tdash.fin.u_isPartyId(aIds[1])
+        oParty := TDashFinParty():new()
+        return oParty:kpis(aIds, oRequest, oHelper)
+    endIf
+
+    if !oPeriod:fromQuery(oRequest:query("dateFrom"), oRequest:query("dateTo"), oRequest:query("compare"), dToday)
+        oHelper:badRequest(oPeriod:cError)
+        return .T.
+    endIf
+
+    for nX := 1 to Len(aIds)
+        if Len(tdash.core.u_findIndicator(finCatalog(), aIds[nX], "kpi")) == 0
+            oHelper:notFound(AllTrim(aIds[nX]), "fin")
+            return .T.
+        endIf
+    next nX
+
+    TRY
+        for nX := 1 to Len(aIds)
+            aDef     := tdash.core.u_findIndicator(finCatalog(), aIds[nX], "kpi")
+            nValue   := ::kpiValue(aDef[1], oPeriod:dFrom, oPeriod:dTo, dToday)
+            lCompare := oPeriod:hasCompare() .and. (aDef[1] == "fin.dso" .or. aDef[1] == "fin.dpo")
+            nPrev    := 0
+            if lCompare
+                nPrev := ::kpiValue(aDef[1], oPeriod:compareFrom(), oPeriod:compareTo(), dToday)
+            endIf
+
+            aAdd(aItems, tdash.core.u_kpiItem(aDef, nValue, lCompare, oPeriod:cCompare, nPrev, oHelper:timestamp()))
+            nTtl := Min(nTtl, aDef[6])
+        next nX
+
+        jBody["items"] := aItems
+        oHelper:setCacheHeaders(nTtl)
+        oRest:setResponse(oHelper:getResponse(jBody))
+    CATCH oError
+        oHelper:serverError("TDashFinApi:kpis", oError:description)
+    ENDTRY
+return .T.
+
+/*/{Protheus.doc} getSeries
+GET /tdash/v1/fin/series/:id?dateFrom&dateTo&grain=day|week|month
+fin.cashflow_projection: a receber, a pagar e saldo projetado (padrão: hoje até hoje + 30).
+fin.cash_realized: entradas e saídas realizadas (padrão: mês corrente).
+@type method
+@author TDash
+@since 20/10/2026
+@return logical, sempre .T.
+/*/
+method getSeries() class TDashFinApi
+    local oRequest := tdash.core.TDashRequest():new() as object
+    local oHelper  := tdash.core.TDashResponseHelper():new() as object
+    local oParty   as object
+    local oPeriod  := tdash.core.TDashPeriod():new() as object
+    local oRepo    := TDashFinRepository():new() as object
+    local jBody    := jsonObject():new() as json
+    local aDef     := {} as array
+    local aIn      := {} as array
+    local aOut     := {} as array
+    local aRows    := {} as array
+    local aPoints  := {} as array
+    local aKeys    := {} as array
+    local cId      := oRequest:path("id") as character
+    local cGrain   := Lower(oRequest:query("grain")) as character
+    local cFrom    := oRequest:query("dateFrom") as character
+    local cTo      := oRequest:query("dateTo") as character
+    local dToday   := Date() as date
+    local nBalance := 0 as numeric
+    local nX       := 0 as numeric
+
+    if tdash.fin.u_isPartyId(cId)
+        oParty := TDashFinParty():new()
+        return oParty:series(cId, oRequest, oHelper)
+    endIf
+
+    aDef := tdash.core.u_findIndicator(finCatalog(), cId, "series")
+    if Len(aDef) == 0
+        oHelper:notFound(cId, "fin")
+        return .T.
+    endIf
+
+    if Empty(cGrain)
+        cGrain := "day"
+    endIf
+    if AScan({ "day", "week", "month" }, {|x| x == cGrain}) == 0
+        oHelper:badRequest("grain inválido. Use day, week ou month.")
+        return .T.
+    endIf
+
+    // Projeção começa hoje e vai 30 dias à frente quando o período não é informado
+    if cId == "fin.cashflow_projection" .and. Empty(cFrom) .and. Empty(cTo)
+        cFrom := DToS(dToday)
+        cTo   := DToS(dToday + DEFAULT_DUE_DAYS)
+    endIf
+
+    if !oPeriod:fromQuery(cFrom, cTo, "none", dToday)
+        oHelper:badRequest(oPeriod:cError)
+        return .T.
+    endIf
+
+    TRY
+        if cId == "fin.cashflow_projection"
+            aIn   := tdash.core.u_groupRows(oRepo:projection("R", oPeriod:dFrom, oPeriod:dTo), cGrain)
+            aOut  := tdash.core.u_groupRows(oRepo:projection("P", oPeriod:dFrom, oPeriod:dTo), cGrain)
+            aKeys := tdash.core.u_mergeKeys(aIn, aOut)
+
+            nBalance := tdash.core.u_sumColumn(oRepo:bankBalances(dToday), 3)
+            for nX := 1 to Len(aKeys)
+                nBalance += tdash.core.u_valueOf(aIn, aKeys[nX]) - tdash.core.u_valueOf(aOut, aKeys[nX])
+                aAdd(aPoints, tdash.core.u_jsonPoint(aKeys[nX], tdash.core.u_valueOf(aIn, aKeys[nX]), "receivable"))
+                aAdd(aPoints, tdash.core.u_jsonPoint(aKeys[nX], tdash.core.u_valueOf(aOut, aKeys[nX]), "payable"))
+                aAdd(aPoints, tdash.core.u_jsonPoint(aKeys[nX], nBalance, "balance"))
+            next nX
+            jBody["series"] := { "receivable", "payable", "balance" }
+        else
+            aRows := oRepo:cashMovements(oPeriod:dFrom, oPeriod:dTo)
+            for nX := 1 to Len(aRows)
+                aAdd(aIn,  { aRows[nX][1], aRows[nX][2] })
+                aAdd(aOut, { aRows[nX][1], aRows[nX][3] })
+            next nX
+            aIn   := tdash.core.u_groupRows(aIn, cGrain)
+            aOut  := tdash.core.u_groupRows(aOut, cGrain)
+            aKeys := tdash.core.u_mergeKeys(aIn, aOut)
+            for nX := 1 to Len(aKeys)
+                aAdd(aPoints, tdash.core.u_jsonPoint(aKeys[nX], tdash.core.u_valueOf(aIn, aKeys[nX]), "in"))
+                aAdd(aPoints, tdash.core.u_jsonPoint(aKeys[nX], tdash.core.u_valueOf(aOut, aKeys[nX]), "out"))
+            next nX
+            jBody["series"] := { "in", "out" }
+        endIf
+
+        jBody["id"]          := aDef[1]
+        jBody["unit"]        := aDef[4]
+        jBody["grain"]       := cGrain
+        jBody["points"]      := aPoints
+        jBody["generatedAt"] := oHelper:timestamp()
+        jBody["ttl"]         := aDef[6]
+
+        oHelper:setCacheHeaders(aDef[6])
+        oRest:setResponse(oHelper:getResponse(jBody))
+    CATCH oError
+        oHelper:serverError("TDashFinApi:series", oError:description)
+    ENDTRY
+return .T.
+
+/*/{Protheus.doc} getBreakdown
+GET /tdash/v1/fin/breakdown/:id?top=10&dateFrom&dateTo
+Composição e rankings: saldo por conta, aging, maiores devedores/credores, caixa por conta.
+@type method
+@author TDash
+@since 20/10/2026
+@return logical, sempre .T.
+/*/
+method getBreakdown() class TDashFinApi
+    local oRequest := tdash.core.TDashRequest():new() as object
+    local oHelper  := tdash.core.TDashResponseHelper():new() as object
+    local oParty   as object
+    local oPeriod  := tdash.core.TDashPeriod():new() as object
+    local oRepo    := TDashFinRepository():new() as object
+    local jBody    := jsonObject():new() as json
+    local aDef     := {} as array
+    local aRows    := {} as array
+    local aItems   := {} as array
+    local cId      := oRequest:path("id") as character
+    local dToday   := Date() as date
+    local nTop     := 0 as numeric
+    local nX       := 0 as numeric
+
+    if tdash.fin.u_isPartyId(cId)
+        oParty := TDashFinParty():new()
+        return oParty:breakdown(cId, oRequest, oHelper)
+    endIf
+
+    aDef := tdash.core.u_findIndicator(finCatalog(), cId, "breakdown")
+    if Len(aDef) == 0
+        oHelper:notFound(cId, "fin")
+        return .T.
+    endIf
+
+    nTop := tdash.core.u_parseInt(oRequest:query("top"), DEFAULT_TOP, 1, 50)
+    if nTop < 0
+        oHelper:badRequest("top deve estar entre 1 e 50.")
+        return .T.
+    endIf
+
+    if !oPeriod:fromQuery(oRequest:query("dateFrom"), oRequest:query("dateTo"), "none", dToday)
+        oHelper:badRequest(oPeriod:cError)
+        return .T.
+    endIf
+
+    TRY
+        do case
+            case cId == "fin.bank_balance"
+                aRows := oRepo:bankBalances(dToday)
+                for nX := 1 to Len(aRows)
+                    aAdd(aItems, tdash.core.u_jsonItem(aRows[nX][1], aRows[nX][2] + " " + aRows[nX][1], aRows[nX][3]))
+                next nX
+                aItems := tdash.core.u_topWithOthers(aItems, nTop, "Outras contas")
+            case cId == "fin.aging_receivable"
+                aItems := tdash.core.u_rowsToItems(oRepo:aging("R", dToday))
+            case cId == "fin.aging_payable"
+                aItems := tdash.core.u_rowsToItems(oRepo:aging("P", dToday))
+            case cId == "fin.top_debtors"
+                aItems := tdash.core.u_rowsToItems(oRepo:topParties("R", dToday, 0, nTop))
+            case cId == "fin.top_creditors"
+                aItems := tdash.core.u_rowsToItems(oRepo:topParties("P", dToday, DEFAULT_DUE_DAYS, nTop))
+            case cId == "fin.cash_by_bank"
+                aRows := oRepo:cashByBank(oPeriod:dFrom, oPeriod:dTo)
+                for nX := 1 to Len(aRows)
+                    // Valor = resultado do período (entradas - saídas) por conta
+                    aAdd(aItems, tdash.core.u_jsonItem(aRows[nX][1], aRows[nX][1], aRows[nX][2] - aRows[nX][3]))
+                next nX
+                aItems := tdash.core.u_topWithOthers(aItems, nTop, "Outras contas")
+        endCase
+
+        jBody["id"]          := aDef[1]
+        jBody["unit"]        := aDef[4]
+        jBody["items"]       := tdash.core.u_applyShares(aItems)
+        jBody["generatedAt"] := oHelper:timestamp()
+        jBody["ttl"]         := aDef[6]
+
+        oHelper:setCacheHeaders(aDef[6])
+        oRest:setResponse(oHelper:getResponse(jBody))
+    CATCH oError
+        oHelper:serverError("TDashFinApi:breakdown", oError:description)
+    ENDTRY
+return .T.
+
+/*/{Protheus.doc} getList
+GET /tdash/v1/fin/list/:id?page=1&pageSize=20
+Títulos vencidos a receber (fin.overdue_receivables) ou a pagar (fin.overdue_payables).
+@type method
+@author TDash
+@since 20/10/2026
+@return logical, sempre .T.
+/*/
+method getList() class TDashFinApi
+    local oRequest  := tdash.core.TDashRequest():new() as object
+    local oHelper   := tdash.core.TDashResponseHelper():new() as object
+    local oParty    as object
+    local oRepo     := TDashFinRepository():new() as object
+    local jBody     as json
+    local aDef      := {} as array
+    local aColumns  := {} as array
+    local cId       := oRequest:path("id") as character
+    local cSide     := "R" as character
+    local cParty    := "Cliente" as character
+    local nPage     := 0 as numeric
+    local nPageSize := 0 as numeric
+
+    if tdash.fin.u_isPartyId(cId)
+        oParty := TDashFinParty():new()
+        return oParty:list(cId, oRequest, oHelper)
+    endIf
+
+    aDef := tdash.core.u_findIndicator(finCatalog(), cId, "list")
+    if Len(aDef) == 0
+        oHelper:notFound(cId, "fin")
+        return .T.
+    endIf
+
+    nPage     := tdash.core.u_parseInt(oRequest:query("page"), 1, 1, 100000)
+    nPageSize := tdash.core.u_parseInt(oRequest:query("pageSize"), DEFAULT_PAGE_SIZE, 1, 100)
+    if nPage < 0 .or. nPageSize < 0
+        oHelper:badRequest("page deve ser maior que zero e pageSize entre 1 e 100.")
+        return .T.
+    endIf
+
+    if cId == "fin.overdue_payables"
+        cSide  := "P"
+        cParty := "Fornecedor"
+    endIf
+
+    aAdd(aColumns, tdash.core.u_jsonColumn("document", "Título", "text"))
+    aAdd(aColumns, tdash.core.u_jsonColumn("party", cParty, "text"))
+    aAdd(aColumns, tdash.core.u_jsonColumn("dueDate", "Vencimento", "date"))
+    aAdd(aColumns, tdash.core.u_jsonColumn("daysLate", "Atraso", "DAYS"))
+    aAdd(aColumns, tdash.core.u_jsonColumn("balance", "Saldo", "BRL"))
+
+    TRY
+        jBody := oRepo:overdueTitles(cSide, Date(), nPage, nPageSize)
+        jBody["columns"] := aColumns
+
+        oHelper:setCacheHeaders(aDef[6])
+        oRest:setResponse(oHelper:getResponse(jBody))
+    CATCH oError
+        oHelper:serverError("TDashFinApi:list", oError:description)
+    ENDTRY
+return .T.
+
+/*/{Protheus.doc} kpiValue
+Calcula o valor de um cartão.
+@type method
+@author TDash
+@since 20/10/2026
+@param cId, character, id do indicador
+@param dFrom, date, início do período (indicadores de período)
+@param dTo, date, fim do período
+@param dToday, date, data de referência dos saldos
+@return numeric, valor
+/*/
+method kpiValue(cId as character, dFrom as date, dTo as date, dToday as date) as numeric class TDashFinApi
+    local oRepo  := TDashFinRepository():new() as object
+    local nValue := 0 as numeric
+    local nOpen  := 0 as numeric
+
+    do case
+        case cId == "fin.bank_balance"
+            nValue := tdash.core.u_sumColumn(oRepo:bankBalances(dToday), 3)
+        case cId == "fin.receivable_open"
+            nValue := oRepo:titleBalance("R", "open", dToday, 0)
+        case cId == "fin.receivable_overdue"
+            nValue := oRepo:titleBalance("R", "overdue", dToday, 0)
+        case cId == "fin.receivable_due"
+            nValue := oRepo:titleBalance("R", "due", dToday, DEFAULT_DUE_DAYS)
+        case cId == "fin.payable_open"
+            nValue := oRepo:titleBalance("P", "open", dToday, 0)
+        case cId == "fin.payable_overdue"
+            nValue := oRepo:titleBalance("P", "overdue", dToday, 0)
+        case cId == "fin.payable_due"
+            nValue := oRepo:titleBalance("P", "due", dToday, DEFAULT_DUE_DAYS)
+        case cId == "fin.default_rate"
+            nOpen := oRepo:titleBalance("R", "open", dToday, 0)
+            if nOpen > 0
+                nValue := (oRepo:titleBalance("R", "late", dToday, DEFAULT_LATE_DAYS) / nOpen) * 100
+            endIf
+        case cId == "fin.dso"
+            nValue := oRepo:averageTerm("R", dFrom, dTo)
+        case cId == "fin.dpo"
+            nValue := oRepo:averageTerm("P", dFrom, dTo)
+    endCase
+return nValue
+
+/*/{Protheus.doc} finCatalog
+Catálogo do Financeiro: { id, tipos, título, unidade, sentido, ttl }.
+@type static function
+@author TDash
+@since 20/10/2026
+@return array, indicadores
+/*/
+static function finCatalog() as array
+return {;
+    { "fin.bank_balance",          { "kpi", "breakdown" }, "Saldo bancário",                "BRL",  "up_is_good",   TTL_OP  },;
+    { "fin.receivable_open",       { "kpi" },              "A receber em aberto",           "BRL",  "neutral",      TTL_OP  },;
+    { "fin.receivable_overdue",    { "kpi" },              "A receber vencido",             "BRL",  "down_is_good", TTL_OP  },;
+    { "fin.receivable_due",        { "kpi" },              "A receber em 30 dias",          "BRL",  "neutral",      TTL_OP  },;
+    { "fin.payable_open",          { "kpi" },              "A pagar em aberto",             "BRL",  "neutral",      TTL_OP  },;
+    { "fin.payable_overdue",       { "kpi" },              "A pagar vencido",               "BRL",  "down_is_good", TTL_OP  },;
+    { "fin.payable_due",           { "kpi" },              "A pagar em 30 dias",            "BRL",  "neutral",      TTL_OP  },;
+    { "fin.default_rate",          { "kpi" },              "Inadimplência",                 "PCT",  "down_is_good", TTL_TAT },;
+    { "fin.dso",                   { "kpi" },              "Prazo médio de recebimento",    "DAYS", "down_is_good", TTL_EST },;
+    { "fin.dpo",                   { "kpi" },              "Prazo médio de pagamento",      "DAYS", "up_is_good",   TTL_EST },;
+    { "fin.cashflow_projection",   { "series" },           "Fluxo de caixa projetado",      "BRL",  "up_is_good",   TTL_TAT },;
+    { "fin.cash_realized",         { "series" },           "Entradas e saídas realizadas",  "BRL",  "up_is_good",   TTL_TAT },;
+    { "fin.aging_receivable",      { "breakdown" },        "Vencidos a receber por atraso", "BRL",  "down_is_good", TTL_TAT },;
+    { "fin.aging_payable",         { "breakdown" },        "Vencidos a pagar por atraso",   "BRL",  "down_is_good", TTL_TAT },;
+    { "fin.top_debtors",           { "breakdown" },        "Maiores devedores",             "BRL",  "down_is_good", TTL_TAT },;
+    { "fin.top_creditors",         { "breakdown" },        "Maiores pagamentos em 30 dias", "BRL",  "neutral",      TTL_TAT },;
+    { "fin.cash_by_bank",          { "breakdown" },        "Resultado do caixa por conta",  "BRL",  "up_is_good",   TTL_TAT },;
+    { "fin.overdue_receivables",   { "list" },             "Títulos a receber vencidos",    "BRL",  "down_is_good", TTL_OP  },;
+    { "fin.overdue_payables",      { "list" },             "Títulos a pagar vencidos",      "BRL",  "down_is_good", TTL_OP  } }

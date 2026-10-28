@@ -1,0 +1,696 @@
+#include 'tlpp-core.th'
+#include 'tlpp-rest.th'
+#include 'totvs.ch'
+
+// Validade das respostas (segundos): RH é estratégico
+#define TTL_EST 43200
+
+#define DEFAULT_TOP       10
+#define DEFAULT_PAGE_SIZE 20
+
+// Verbas de hora extra: código com 3 caracteres (RV_COD), até 30 por chamada
+#define CODE_LEN  3
+#define MAX_CODES 30
+
+/*/{Protheus.doc} TDashGpeApi
+APIs de negócio de Recursos Humanos para o TDash.
+Rotas: catalog, kpis, series/:id, breakdown/:id, list/:id (prefixo /tdash/v1/gpe).
+LGPD: só números agrupados; grupos com menos de MV_TDMINGR pessoas (padrão 5) entram em "Outros", e valores de
+folha e hora extra de menos pessoas que isso não são devolvidos ("hidden"). Não há lista de pessoas.
+Indicadores e regras: docs/10-catalogo-de-indicadores.md (seção Recursos Humanos).
+Formato das respostas (o que o app espera): docs/02-contrato-de-resposta.md.
+@type class
+@author TDash
+@since 21/10/2026
+@version 1.0
+/*/
+namespace tdash.gpe
+
+class TDashGpeApi
+    public method new()
+
+    @Get("/tdash/v1/gpe/catalog")
+    public method getCatalog()
+
+    @Get("/tdash/v1/gpe/kpis")
+    public method getKpis()
+
+    @Get("/tdash/v1/gpe/series/:id")
+    public method getSeries()
+
+    @Get("/tdash/v1/gpe/breakdown/:id")
+    public method getBreakdown()
+
+    @Get("/tdash/v1/gpe/list/:id")
+    public method getList()
+
+    private method kpi(aDef as array, oPeriod as object, oRepo as object, aCodes as array, nMin as numeric, cTimestamp as character) as json
+    private method configError(cMessage as character)
+endclass
+
+method new() class TDashGpeApi
+return self
+
+/*/{Protheus.doc} getCatalog
+GET /tdash/v1/gpe/catalog
+@type method
+@author TDash
+@since 21/10/2026
+@return logical, sempre .T.
+/*/
+method getCatalog() class TDashGpeApi
+    local oHelper := tdash.core.TDashResponseHelper():new() as object
+    local jBody   := jsonObject():new() as json
+
+    jBody["items"] := tdash.core.u_catalogItems(gpeCatalog())
+    oHelper:setCacheHeaders(TTL_EST)
+    oRest:setResponse(oHelper:getResponse(jBody))
+return .T.
+
+/*/{Protheus.doc} getKpis
+GET /tdash/v1/gpe/kpis?ids=a,b&dateFrom=AAAAMMDD&dateTo=AAAAMMDD&compare=none|prev|yoy&overtimeCodes=179,181
+Quadro na data final; admissões, desligamentos, turnover e absenteísmo no período; folha e horas extras nas
+competências fechadas (u_payrollMonths). gpe.overtime e gpe.overtime_hours exigem overtimeCodes.
+@type method
+@author TDash
+@since 21/10/2026
+@return logical, sempre .T.
+/*/
+method getKpis() class TDashGpeApi
+    local oRequest := tdash.core.TDashRequest():new() as object
+    local oHelper  := tdash.core.TDashResponseHelper():new() as object
+    local oPeriod  := tdash.core.TDashPeriod():new() as object
+    local oRepo    as object
+    local jBody    := jsonObject():new() as json
+    local aIds     := {} as array
+    local aItems   := {} as array
+    local aDef     := {} as array
+    local aCodes   := {} as array
+    local lOvertime := .F. as logical
+    local nMin     := 0 as numeric
+    local nX       := 0 as numeric
+
+    aIds := StrTokArr2(oRequest:query("ids"), ",", .F.)
+    if Len(aIds) == 0 .or. Len(aIds) > 20
+        oHelper:badRequest("Informe de 1 a 20 indicadores em ids.")
+        return .T.
+    endIf
+
+    if !oPeriod:fromQuery(oRequest:query("dateFrom"), oRequest:query("dateTo"), oRequest:query("compare"), Date())
+        oHelper:badRequest(oPeriod:cError)
+        return .T.
+    endIf
+
+    for nX := 1 to Len(aIds)
+        aIds[nX] := AllTrim(aIds[nX])
+        if Len(tdash.core.u_findIndicator(gpeCatalog(), aIds[nX], "kpi")) == 0
+            oHelper:notFound(aIds[nX], "gpe")
+            return .T.
+        endIf
+        if aIds[nX] == "gpe.overtime" .or. aIds[nX] == "gpe.overtime_hours"
+            lOvertime := .T.
+        endIf
+    next nX
+
+    if lOvertime
+        aCodes := tdash.core.u_parseCodeList(oRequest:query("overtimeCodes"), CODE_LEN, MAX_CODES)
+        if Len(aCodes) == 0
+            ::configError("Escolha as verbas de hora extra nas Configurações do app.")
+            return .T.
+        endIf
+    endIf
+
+    TRY
+        nMin  := minGroup()
+        oRepo := TDashGpeRepository():new()
+        if lOvertime .and. oRepo:countCodes(aCodes) < Len(aCodes)
+            ::configError("Uma ou mais verbas de hora extra não existem nesta filial.")
+        else
+            for nX := 1 to Len(aIds)
+                aDef := tdash.core.u_findIndicator(gpeCatalog(), aIds[nX], "kpi")
+                aAdd(aItems, ::kpi(aDef, oPeriod, oRepo, aCodes, nMin, oHelper:timestamp()))
+            next nX
+
+            jBody["items"] := aItems
+            oHelper:setCacheHeaders(TTL_EST)
+            oRest:setResponse(oHelper:getResponse(jBody))
+        endIf
+    CATCH oError
+        oHelper:serverError("TDashGpeApi:kpis", oError:description)
+    ENDTRY
+return .T.
+
+/*/{Protheus.doc} getSeries
+GET /tdash/v1/gpe/series/:id?dateFrom&dateTo&grain=day|week|month[&overtimeCodes=...]
+gpe.movements: séries "hires" (admissões) e "terminations" (desligamentos). gpe.payroll e gpe.overtime: série
+"payroll" ou "overtime", por competência fechada (sempre mensal); competências de menos de MV_TDMINGR pessoas
+ficam fora.
+@type method
+@author TDash
+@since 21/10/2026
+@return logical, sempre .T.
+/*/
+method getSeries() class TDashGpeApi
+    local oRequest := tdash.core.TDashRequest():new() as object
+    local oHelper  := tdash.core.TDashResponseHelper():new() as object
+    local oPeriod  := tdash.core.TDashPeriod():new() as object
+    local oRepo    as object
+    local jBody    := jsonObject():new() as json
+    local aDef     := {} as array
+    local aCodes   := {} as array
+    local aHires   := {} as array
+    local aLeaves  := {} as array
+    local aKeys    := {} as array
+    local aRows    := {} as array
+    local aMonthly := {} as array
+    local aPoints  := {} as array
+    local aSeries  := {} as array
+    local cId      := oRequest:path("id") as character
+    local cGrain   := Lower(oRequest:query("grain")) as character
+    local cName    := "" as character
+    local nMin     := 0 as numeric
+    local nX       := 0 as numeric
+
+    aDef := tdash.core.u_findIndicator(gpeCatalog(), cId, "series")
+    if Len(aDef) == 0
+        oHelper:notFound(cId, "gpe")
+        return .T.
+    endIf
+
+    if Empty(cGrain)
+        cGrain := "month"
+    endIf
+    if AScan({ "day", "week", "month" }, {|x| x == cGrain}) == 0
+        oHelper:badRequest("grain inválido. Use day, week ou month.")
+        return .T.
+    endIf
+
+    if !oPeriod:fromQuery(oRequest:query("dateFrom"), oRequest:query("dateTo"), "none", Date())
+        oHelper:badRequest(oPeriod:cError)
+        return .T.
+    endIf
+
+    if cId == "gpe.overtime"
+        aCodes := tdash.core.u_parseCodeList(oRequest:query("overtimeCodes"), CODE_LEN, MAX_CODES)
+        if Len(aCodes) == 0
+            ::configError("Escolha as verbas de hora extra nas Configurações do app.")
+            return .T.
+        endIf
+    endIf
+
+    TRY
+        nMin  := minGroup()
+        oRepo := TDashGpeRepository():new()
+        if cId == "gpe.movements"
+            aHires  := tdash.core.u_groupRows(oRepo:movementsByDay("hires", oPeriod:dFrom, oPeriod:dTo), cGrain)
+            aLeaves := tdash.core.u_groupRows(oRepo:movementsByDay("terminations", oPeriod:dFrom, oPeriod:dTo), cGrain)
+            aKeys   := tdash.core.u_mergeKeys(aHires, aLeaves)
+            for nX := 1 to Len(aKeys)
+                aAdd(aPoints, tdash.core.u_jsonPoint(aKeys[nX], tdash.core.u_valueOf(aHires, aKeys[nX]), "hires"))
+                aAdd(aPoints, tdash.core.u_jsonPoint(aKeys[nX], tdash.core.u_valueOf(aLeaves, aKeys[nX]), "terminations"))
+            next nX
+            aSeries := { "hires", "terminations" }
+        else
+            cGrain := "month"
+            cName  := StrTran(cId, "gpe.", "")
+            if cId == "gpe.payroll"
+                aRows := oRepo:payrollByMonth(Left(DToS(oPeriod:dFrom), 6), Left(DToS(oPeriod:dTo), 6))
+            else
+                aRows := oRepo:overtimeByMonth(aCodes, Left(DToS(oPeriod:dFrom), 6), Left(DToS(oPeriod:dTo), 6))
+            endIf
+            for nX := 1 to Len(aRows)
+                if aRows[nX][3] >= nMin
+                    aAdd(aMonthly, { aRows[nX][1] + "01", aRows[nX][2] })
+                endIf
+            next nX
+            aMonthly := tdash.core.u_groupRows(aMonthly, "month")
+            for nX := 1 to Len(aMonthly)
+                aAdd(aPoints, tdash.core.u_jsonPoint(aMonthly[nX][1], aMonthly[nX][2], cName))
+            next nX
+            aSeries := { cName }
+        endIf
+
+        jBody["id"]          := aDef[1]
+        jBody["unit"]        := aDef[4]
+        jBody["grain"]       := cGrain
+        jBody["series"]      := aSeries
+        jBody["points"]      := aPoints
+        jBody["generatedAt"] := oHelper:timestamp()
+        jBody["ttl"]         := aDef[6]
+
+        oHelper:setCacheHeaders(aDef[6])
+        oRest:setResponse(oHelper:getResponse(jBody))
+    CATCH oError
+        oHelper:serverError("TDashGpeApi:series", oError:description)
+    ENDTRY
+return .T.
+
+/*/{Protheus.doc} getBreakdown
+GET /tdash/v1/gpe/breakdown/gpe.headcount?dimension=cc|role&top=10&dateTo
+GET /tdash/v1/gpe/breakdown/gpe.demographics?dimension=age|tenure|sex&dateTo
+GET /tdash/v1/gpe/breakdown/gpe.absenteeism?dateFrom&dateTo&top=10 (dias por tipo de ausência)
+GET /tdash/v1/gpe/breakdown/gpe.payroll_by_cc?dateFrom&dateTo&top=10 (competências fechadas, em dateFrom/dateTo)
+Todos passam pelo agrupamento da LGPD (u_lgpdGroups); total abaixo do mínimo devolve lista vazia e um aviso.
+@type method
+@author TDash
+@since 21/10/2026
+@return logical, sempre .T.
+/*/
+method getBreakdown() class TDashGpeApi
+    local oRequest   := tdash.core.TDashRequest():new() as object
+    local oHelper    := tdash.core.TDashResponseHelper():new() as object
+    local oPeriod    := tdash.core.TDashPeriod():new() as object
+    local oRepo      as object
+    local jBody      := jsonObject():new() as json
+    local aDef       := {} as array
+    local aRows      := {} as array
+    local aGroups    := {} as array
+    local aMonths    := {} as array
+    local aWarning   := {} as array
+    local cId        := oRequest:path("id") as character
+    local cDimension := Lower(oRequest:query("dimension")) as character
+    local cUnit      := "" as character
+    local nMin       := 0 as numeric
+    local nTop       := 0 as numeric
+
+    aDef := tdash.core.u_findIndicator(gpeCatalog(), cId, "breakdown")
+    if Len(aDef) == 0
+        oHelper:notFound(cId, "gpe")
+        return .T.
+    endIf
+
+    nTop := tdash.core.u_parseInt(oRequest:query("top"), DEFAULT_TOP, 1, 50)
+    if nTop < 0
+        oHelper:badRequest("top deve estar entre 1 e 50.")
+        return .T.
+    endIf
+
+    do case
+        case cId == "gpe.headcount"
+            if Empty(cDimension)
+                cDimension := "cc"
+            endIf
+            if AScan({ "cc", "role" }, {|x| x == cDimension}) == 0
+                oHelper:badRequest("dimension inválida. Use cc ou role.")
+                return .T.
+            endIf
+        case cId == "gpe.demographics"
+            if Empty(cDimension)
+                cDimension := "age"
+            endIf
+            if AScan({ "age", "tenure", "sex" }, {|x| x == cDimension}) == 0
+                oHelper:badRequest("dimension inválida. Use age, tenure ou sex.")
+                return .T.
+            endIf
+    endCase
+
+    if !oPeriod:fromQuery(oRequest:query("dateFrom"), oRequest:query("dateTo"), "none", Date())
+        oHelper:badRequest(oPeriod:cError)
+        return .T.
+    endIf
+
+    TRY
+        nMin  := minGroup()
+        oRepo := TDashGpeRepository():new()
+        cUnit := aDef[4]
+        do case
+            case cId == "gpe.headcount"
+                aRows   := oRepo:headcountBy(cDimension, oPeriod:dTo)
+                aGroups := tdash.gpe.u_lgpdGroups(aRows, nMin, nTop)
+            case cId == "gpe.demographics"
+                aRows   := demographicRows(oRepo:activePeople(oPeriod:dTo), cDimension, oPeriod:dTo)
+                aGroups := tdash.gpe.u_lgpdGroups(aRows, nMin, 0)
+            case cId == "gpe.absenteeism"
+                cUnit   := "DAYS"
+                aRows   := absenceRows(oRepo:absences(oPeriod:dFrom, oPeriod:dTo), oPeriod:dFrom, oPeriod:dTo)
+                aGroups := tdash.gpe.u_lgpdGroups(aRows, nMin, nTop)
+            otherwise // gpe.payroll_by_cc
+                aMonths := tdash.gpe.u_payrollMonths(Left(DToS(oPeriod:dFrom), 6), Left(DToS(oPeriod:dTo), 6), ;
+                    oRepo:lastClosedMonth(Left(DToS(oPeriod:dTo), 6)), "none")
+                aRows   := oRepo:payrollByCc(aMonths[1], aMonths[2])
+                aGroups := tdash.gpe.u_lgpdGroups(aRows, nMin, nTop)
+                jBody["dateFrom"] := Transform(aMonths[1] + "01", "@R 9999-99-99")
+                jBody["dateTo"]   := Transform(DToS(LastDay(SToD(aMonths[2] + "01"))), "@R 9999-99-99")
+        endCase
+
+        if Len(aRows) > 0 .and. Len(aGroups) == 0
+            aAdd(aWarning, "Menos de " + cValToChar(nMin) + " pessoas: dados protegidos pela LGPD.")
+        endIf
+
+        jBody["id"]          := aDef[1]
+        jBody["unit"]        := cUnit
+        jBody["items"]       := tdash.core.u_applyShares(tdash.core.u_rowsToItems(aGroups))
+        jBody["warnings"]    := aWarning
+        jBody["generatedAt"] := oHelper:timestamp()
+        jBody["ttl"]         := aDef[6]
+
+        oHelper:setCacheHeaders(aDef[6])
+        oRest:setResponse(oHelper:getResponse(jBody))
+    CATCH oError
+        oHelper:serverError("TDashGpeApi:breakdown", oError:description)
+    ENDTRY
+return .T.
+
+/*/{Protheus.doc} getList
+GET /tdash/v1/gpe/list/gpe.payroll_codes?page=1&pageSize=100
+Verbas de provento, para escolher as de hora extra. É a única lista do RH: não há lista de pessoas.
+@type method
+@author TDash
+@since 21/10/2026
+@return logical, sempre .T.
+/*/
+method getList() class TDashGpeApi
+    local oRequest  := tdash.core.TDashRequest():new() as object
+    local oHelper   := tdash.core.TDashResponseHelper():new() as object
+    local oRepo     as object
+    local jBody     as json
+    local aDef      := {} as array
+    local aColumns  := {} as array
+    local cId       := oRequest:path("id") as character
+    local nPage     := 0 as numeric
+    local nPageSize := 0 as numeric
+
+    aDef := tdash.core.u_findIndicator(gpeCatalog(), cId, "list")
+    if Len(aDef) == 0
+        oHelper:notFound(cId, "gpe")
+        return .T.
+    endIf
+
+    nPage     := tdash.core.u_parseInt(oRequest:query("page"), 1, 1, 100000)
+    nPageSize := tdash.core.u_parseInt(oRequest:query("pageSize"), DEFAULT_PAGE_SIZE, 1, 100)
+    if nPage < 0 .or. nPageSize < 0
+        oHelper:badRequest("page deve ser maior que zero e pageSize entre 1 e 100.")
+        return .T.
+    endIf
+
+    TRY
+        oRepo := TDashGpeRepository():new()
+        aAdd(aColumns, tdash.core.u_jsonColumn("document", "Verba", "text"))
+        aAdd(aColumns, tdash.core.u_jsonColumn("party", "Descrição", "text"))
+        jBody := oRepo:payrollCodes(nPage, nPageSize)
+        jBody["columns"] := aColumns
+
+        oHelper:setCacheHeaders(aDef[6])
+        oRest:setResponse(oHelper:getResponse(jBody))
+    CATCH oError
+        oHelper:serverError("TDashGpeApi:list", oError:description)
+    ENDTRY
+return .T.
+
+/*/{Protheus.doc} kpi
+Cartão de um indicador do RH, com comparação e proteção da LGPD.
+@type method
+@author TDash
+@since 21/10/2026
+@return json, cartão
+/*/
+method kpi(aDef as array, oPeriod as object, oRepo as object, aCodes as array, nMin as numeric, cTimestamp as character) as json class TDashGpeApi
+    local jItem    as json
+    local aMonths  := {} as array
+    local aCurrent := {} as array
+    local aPrev    := {} as array
+    local cId      := aDef[1] as character
+    local cEvent   := "" as character
+    local cTitle   := "" as character
+    local lCompare := oPeriod:hasCompare() as logical
+    local lHidden  := .F. as logical
+    local nValue   := 0 as numeric
+    local nPrev    := 0 as numeric
+
+    do case
+        case cId == "gpe.headcount"
+            nValue := oRepo:headcount(oPeriod:dTo)
+            if lCompare
+                nPrev := oRepo:headcount(oPeriod:compareTo())
+            endIf
+        case cId == "gpe.hires" .or. cId == "gpe.terminations"
+            cEvent := "terminations"
+            if cId == "gpe.hires"
+                cEvent := "hires"
+            endIf
+            nValue := oRepo:movements(cEvent, oPeriod:dFrom, oPeriod:dTo)
+            if lCompare
+                nPrev := oRepo:movements(cEvent, oPeriod:compareFrom(), oPeriod:compareTo())
+            endIf
+        case cId == "gpe.turnover"
+            nValue := turnover(oRepo, oPeriod:dFrom, oPeriod:dTo)
+            if lCompare
+                nPrev := turnover(oRepo, oPeriod:compareFrom(), oPeriod:compareTo())
+            endIf
+        case cId == "gpe.absenteeism"
+            lHidden := oRepo:headcount(oPeriod:dTo) < nMin
+            nValue  := absenteeism(oRepo, oPeriod:dFrom, oPeriod:dTo)
+            if lCompare
+                nPrev := absenteeism(oRepo, oPeriod:compareFrom(), oPeriod:compareTo())
+            endIf
+        otherwise // gpe.payroll, gpe.overtime, gpe.overtime_hours: competências fechadas
+            aMonths := tdash.gpe.u_payrollMonths(Left(DToS(oPeriod:dFrom), 6), Left(DToS(oPeriod:dTo), 6), ;
+                oRepo:lastClosedMonth(Left(DToS(oPeriod:dTo), 6)), oPeriod:cCompare)
+            aCurrent := moneyValues(oRepo, cId, aCodes, aMonths[1], aMonths[2])
+            nValue   := aCurrent[1]
+            lHidden  := aCurrent[2] > 0 .and. aCurrent[2] < nMin
+            if lCompare
+                aPrev    := moneyValues(oRepo, cId, aCodes, aMonths[3], aMonths[4])
+                nPrev    := aPrev[1]
+                lCompare := !(aPrev[2] > 0 .and. aPrev[2] < nMin)
+            endIf
+            if aMonths[5]
+                cTitle := aDef[3] + " (" + tdash.gpe.u_monthLabel(aMonths[1], aMonths[2]) + ")"
+            endIf
+    endCase
+
+    jItem := tdash.core.u_kpiItem(aDef, nValue, lCompare, oPeriod:cCompare, nPrev, cTimestamp)
+    if !Empty(cTitle)
+        jItem["title"] := cTitle
+    endIf
+    if lHidden
+        jItem["value"]   := 0
+        jItem["compare"] := Nil
+        jItem["hidden"]  := .T.
+    endIf
+return jItem
+
+/*/{Protheus.doc} configError
+Responde 422 quando falta um parâmetro que o usuário escolhe no app (verbas de hora extra).
+@type method
+@author TDash
+@since 21/10/2026
+@param cMessage, character, mensagem para o usuário
+/*/
+method configError(cMessage as character) class TDashGpeApi
+    local oHelper := tdash.core.TDashResponseHelper():new() as object
+
+    oRest:setStatusCode(422)
+    oRest:setResponse(oHelper:getErrorResponse("TDASH-422-CONFIG", cMessage, "Configure as verbas em Configurações > Parâmetros dos indicadores."))
+return
+
+/*/{Protheus.doc} minGroup
+Tamanho mínimo de grupo da LGPD (MV_TDMINGR, padrão 5).
+@type static function
+@author TDash
+@since 21/10/2026
+@return numeric, mínimo de pessoas
+/*/
+static function minGroup() as numeric
+    local nMin := Val(cValToChar(SuperGetMV("MV_TDMINGR", .F., 5))) as numeric
+
+    if nMin < 1 .or. nMin > 100
+        nMin := 5
+    endIf
+return nMin
+
+/*/{Protheus.doc} averageHeadcount
+Quadro médio do período: média entre a véspera do início e o fim.
+@type static function
+@author TDash
+@since 21/10/2026
+@return numeric, pessoas
+/*/
+static function averageHeadcount(oRepo as object, dFrom as date, dTo as date) as numeric
+return (oRepo:headcount(DaySub(dFrom, 1)) + oRepo:headcount(dTo)) / 2
+
+/*/{Protheus.doc} turnover
+Turnover (%): média de admissões e desligamentos ÷ quadro médio.
+@type static function
+@author TDash
+@since 21/10/2026
+@return numeric, percentual
+/*/
+static function turnover(oRepo as object, dFrom as date, dTo as date) as numeric
+    local nAverage := 0 as numeric
+    local nMoves   := 0 as numeric
+    local nValue   := 0 as numeric
+
+    nAverage := averageHeadcount(oRepo, dFrom, dTo)
+    if nAverage > 0
+        nMoves := (oRepo:movements("hires", dFrom, dTo) + oRepo:movements("terminations", dFrom, dTo)) / 2
+        nValue := nMoves / nAverage * 100
+    endIf
+return nValue
+
+/*/{Protheus.doc} absenteeism
+Absenteísmo (%): dias de ausência no período ÷ (quadro médio × dias do período), em dias corridos.
+@type static function
+@author TDash
+@since 21/10/2026
+@return numeric, percentual
+/*/
+static function absenteeism(oRepo as object, dFrom as date, dTo as date) as numeric
+    local aRows  := {} as array
+    local nBase  := 0 as numeric
+    local nDays  := 0 as numeric
+    local nValue := 0 as numeric
+    local nX     := 0 as numeric
+
+    nBase := averageHeadcount(oRepo, dFrom, dTo) * (DateDiffDay(dFrom, dTo) + 1)
+    if nBase > 0
+        aRows := oRepo:absences(dFrom, dTo)
+        for nX := 1 to Len(aRows)
+            nDays += tdash.gpe.u_absenceDays(aRows[nX][4], aRows[nX][5], dFrom, dTo)
+        next nX
+        nValue := nDays / nBase * 100
+    endIf
+return nValue
+
+/*/{Protheus.doc} moneyValues
+Valor e quantidade de pessoas de folha ou hora extra nas competências.
+@type static function
+@author TDash
+@since 21/10/2026
+@return array, { valor, pessoas }
+/*/
+static function moneyValues(oRepo as object, cId as character, aCodes as array, cFrom as character, cTo as character) as array
+    local aTotal := {} as array
+
+    if cId == "gpe.payroll"
+        aTotal := oRepo:payroll(cFrom, cTo)
+    elseIf cId == "gpe.overtime"
+        aTotal := oRepo:overtime(aCodes, cFrom, cTo)
+        aTotal := { aTotal[1], aTotal[3] }
+    else // gpe.overtime_hours
+        aTotal := oRepo:overtime(aCodes, cFrom, cTo)
+        aTotal := { aTotal[2], aTotal[3] }
+    endIf
+return aTotal
+
+/*/{Protheus.doc} demographicRows
+Conta os ativos por faixa etária, tempo de casa ou sexo, na ordem das faixas.
+@type static function
+@author TDash
+@since 21/10/2026
+@param aPeople, array, { { nascimento, admissão, sexo }, ... }
+@param cDimension, character, age | tenure | sex
+@param dRef, date, data de referência
+@return array, { { chave, rótulo, pessoas, pessoas }, ... }
+/*/
+static function demographicRows(aPeople as array, cDimension as character, dRef as date) as array
+    local aRows := {} as array
+    local aBand := {} as array
+    local nPos  := 0 as numeric
+    local nX    := 0 as numeric
+
+    for nX := 1 to Len(aPeople)
+        do case
+            case cDimension == "age"
+                aBand := tdash.gpe.u_ageBand(aPeople[nX][1], dRef)
+            case cDimension == "tenure"
+                aBand := tdash.gpe.u_tenureBand(aPeople[nX][2], dRef)
+            otherwise
+                aBand := sexBand(aPeople[nX][3])
+        endCase
+
+        nPos := AScan(aRows, {|x| x[1] == aBand[1]})
+        if nPos == 0
+            aAdd(aRows, { aBand[1], aBand[2], 1, 1 })
+        else
+            aRows[nPos][3]++
+            aRows[nPos][4]++
+        endIf
+    next nX
+    aSort(aRows, , , {|a, b| a[1] < b[1]})
+return aRows
+
+/*/{Protheus.doc} sexBand
+Grupo por sexo (RA_SEXO).
+@type static function
+@author TDash
+@since 21/10/2026
+@return array, { chave de ordenação, rótulo }
+/*/
+static function sexBand(cSex as character) as array
+    local aBand := {} as array
+
+    do case
+        case cSex == "F"
+            aBand := { "1", "Feminino" }
+        case cSex == "M"
+            aBand := { "2", "Masculino" }
+        otherwise
+            aBand := { "9", "Não informado" }
+    endCase
+return aBand
+
+/*/{Protheus.doc} absenceRows
+Dias de ausência no período por tipo, com a quantidade de pessoas de cada tipo.
+@type static function
+@author TDash
+@since 21/10/2026
+@param aAbsences, array, { { matrícula, tipo, descrição, início, fim }, ... }
+@param dFrom, date, início do período
+@param dTo, date, fim do período
+@return array, { { tipo, descrição, dias, pessoas }, ... }, do maior número de dias para o menor
+/*/
+static function absenceRows(aAbsences as array, dFrom as date, dTo as date) as array
+    local aRows   := {} as array
+    local aPeople := {} as array
+    local cType   := "" as character
+    local cLabel  := "" as character
+    local nDays   := 0 as numeric
+    local nPos    := 0 as numeric
+    local nX      := 0 as numeric
+
+    for nX := 1 to Len(aAbsences)
+        nDays := tdash.gpe.u_absenceDays(aAbsences[nX][4], aAbsences[nX][5], dFrom, dTo)
+        if nDays > 0
+            cType := aAbsences[nX][2]
+            nPos  := AScan(aRows, {|x| x[1] == cType})
+            if nPos == 0
+                cLabel := aAbsences[nX][3]
+                if Empty(cLabel)
+                    cLabel := "Tipo " + cType
+                endIf
+                aAdd(aRows, { cType, cLabel, 0, 0 })
+                aAdd(aPeople, {})
+                nPos := Len(aRows)
+            endIf
+            aRows[nPos][3] += nDays
+            if AScan(aPeople[nPos], {|x| x == aAbsences[nX][1]}) == 0
+                aAdd(aPeople[nPos], aAbsences[nX][1])
+                aRows[nPos][4]++
+            endIf
+        endIf
+    next nX
+    aSort(aRows, , , {|a, b| a[3] > b[3]})
+return aRows
+
+/*/{Protheus.doc} gpeCatalog
+Catálogo do RH: { id, tipos, título, unidade, sentido, ttl }.
+@type static function
+@author TDash
+@since 21/10/2026
+@return array, indicadores
+/*/
+static function gpeCatalog() as array
+return {;
+    { "gpe.headcount",      { "kpi", "breakdown" },    "Funcionários ativos",            "COUNT", "neutral",      TTL_EST },;
+    { "gpe.hires",          { "kpi" },                 "Admissões",                      "COUNT", "neutral",      TTL_EST },;
+    { "gpe.terminations",   { "kpi" },                 "Desligamentos",                  "COUNT", "down_is_good", TTL_EST },;
+    { "gpe.turnover",       { "kpi" },                 "Turnover",                       "PCT",   "down_is_good", TTL_EST },;
+    { "gpe.movements",      { "series" },              "Admissões e desligamentos",      "COUNT", "neutral",      TTL_EST },;
+    { "gpe.absenteeism",    { "kpi", "breakdown" },    "Absenteísmo",                    "PCT",   "down_is_good", TTL_EST },;
+    { "gpe.payroll",        { "kpi", "series" },       "Folha de pagamento",             "BRL",   "neutral",      TTL_EST },;
+    { "gpe.payroll_by_cc",  { "breakdown" },           "Folha por centro de custo",      "BRL",   "neutral",      TTL_EST },;
+    { "gpe.overtime",       { "kpi", "series" },       "Horas extras",                   "BRL",   "down_is_good", TTL_EST },;
+    { "gpe.overtime_hours", { "kpi" },                 "Horas extras (horas)",           "HOURS", "down_is_good", TTL_EST },;
+    { "gpe.demographics",   { "breakdown" },           "Perfil do quadro",               "COUNT", "neutral",      TTL_EST },;
+    { "gpe.payroll_codes",  { "list" },                "Verbas de provento",             "COUNT", "neutral",      TTL_EST } }

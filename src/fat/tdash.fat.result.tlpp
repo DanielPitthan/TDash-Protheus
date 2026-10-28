@@ -1,0 +1,180 @@
+#include 'tlpp-core.th'
+#include 'totvs.ch'
+
+// Percentual da venda sem custo calculado a partir do qual o mês é marcado como custo incompleto
+#define UNCOSTED_LIMIT 2
+
+namespace tdash.fat
+
+/*/{Protheus.doc} u_resultSum
+Resultado das vendas de um conjunto de linhas (um período ou um mês). Regras:
+- venda = D2_TOTAL das vendas menos D1_TOTAL das devoluções;
+- custo = D2_CUSTO1 das vendas menos D1_CUSTO das devoluções; lucro bruto = venda - custo;
+- impostos = ICMS + IPI + ICMS-ST + ISS + PIS e COFINS (regime atual) ou CBS e IBS (regime da reforma), já descontados
+  os das devoluções; lucro líquido = lucro bruto - impostos. Em 2026 a CBS e o IBS são destacados mas compensados no
+  PIS/COFINS, por isso só um dos pares entra no total. Retenções (PIS, COFINS, CSLL e IRRF retidos) não entram;
+- venda sem custo = vendas com D2_CUSTO1 zerado em TES que movimenta estoque (custo ainda não calculado), em valor e
+  em % da venda.
+@type user function
+@author TDash
+@since 26/10/2026
+@param aRows, array, linhas (json) { day, kind (sale | return), revenue, cost, uncosted, icms, ipi, st, pis, cofins, iss, cbs, ibs }
+@param lReform, logical, .T. soma CBS e IBS no lugar de PIS e COFINS
+@return json, { revenue, cost, uncosted, icms, ipi, st, pis, cofins, iss, cbs, ibs, taxes, gross, net, uncostedPct, costIncomplete }
+/*/
+User Function resultSum(aRows as array, lReform as logical) as json
+    local jSum    := jsonObject():new() as json
+    local aFields := resultFields() as array
+    local nSign   := 1 as numeric
+    local nX      := 0 as numeric
+    local nY      := 0 as numeric
+
+    for nY := 1 to Len(aFields)
+        jSum[aFields[nY]] := 0
+    next nY
+
+    for nX := 1 to Len(aRows)
+        nSign := 1
+        if aRows[nX]["kind"] == "return"
+            nSign := -1
+        endIf
+        for nY := 1 to Len(aFields)
+            jSum[aFields[nY]] += nSign * aRows[nX][aFields[nY]]
+        next nY
+    next nX
+
+    for nY := 1 to Len(aFields)
+        jSum[aFields[nY]] := Round(jSum[aFields[nY]], 2)
+    next nY
+
+    jSum["taxes"] := jSum["icms"] + jSum["ipi"] + jSum["st"] + jSum["iss"]
+    if lReform
+        jSum["taxes"] += jSum["cbs"] + jSum["ibs"]
+    else
+        jSum["taxes"] += jSum["pis"] + jSum["cofins"]
+    endIf
+    jSum["gross"]       := jSum["revenue"] - jSum["cost"]
+    jSum["net"]         := jSum["gross"] - jSum["taxes"]
+    jSum["uncostedPct"] := 0
+    if jSum["revenue"] > 0
+        jSum["uncostedPct"] := Round((jSum["uncosted"] / jSum["revenue"]) * 100, 2)
+    endIf
+    jSum["costIncomplete"] := jSum["uncostedPct"] > UNCOSTED_LIMIT
+return jSum
+
+/*/{Protheus.doc} u_resultMonths
+Resultado mês a mês (mesmas regras de u_resultSum), na ordem dos meses.
+@type user function
+@author TDash
+@since 26/10/2026
+@param aRows, array, linhas de u_resultSum (day em AAAAMMDD)
+@param lReform, logical, .T. soma CBS e IBS no lugar de PIS e COFINS
+@return array, itens de u_resultSum com "month" (AAAA-MM)
+/*/
+User Function resultMonths(aRows as array, lReform as logical) as array
+    local aGroups := {} as array
+    local aMonths := {} as array
+    local jMonth  as json
+    local cKey    := "" as character
+    local nPos    := 0 as numeric
+    local nX      := 0 as numeric
+
+    for nX := 1 to Len(aRows)
+        cKey := tdash.core.u_bucketKey(aRows[nX]["day"], "month")
+        nPos := AScan(aGroups, {|x| x[1] == cKey})
+        if nPos == 0
+            aAdd(aGroups, { cKey, {} })
+            nPos := Len(aGroups)
+        endIf
+        aAdd(aGroups[nPos][2], aRows[nX])
+    next nX
+
+    aSort(aGroups, , , {|a, b| a[1] < b[1]})
+    for nX := 1 to Len(aGroups)
+        jMonth := tdash.fat.u_resultSum(aGroups[nX][2], lReform)
+        jMonth["month"] := aGroups[nX][1]
+        aAdd(aMonths, jMonth)
+    next nX
+return aMonths
+
+/*/{Protheus.doc} u_taxItems
+Impostos do resultado, um item por tipo (os zerados ficam de fora). O par que não entra no total (CBS/IBS no regime
+atual, PIS/COFINS no da reforma) aparece com "(fora do total)" no rótulo.
+@type user function
+@author TDash
+@since 26/10/2026
+@param jSum, json, resultado de u_resultSum
+@param lReform, logical, .T. quando CBS e IBS entram no total
+@return array, itens (json) { key, label, value }
+/*/
+User Function taxItems(jSum as json, lReform as logical) as array
+    local aTaxes := {} as array
+    local aItems := {} as array
+    local cLabel := "" as character
+    local nX     := 0 as numeric
+
+    aTaxes := {;
+        { "icms",   "ICMS",    .T. },;
+        { "ipi",    "IPI",     .T. },;
+        { "st",     "ICMS-ST", .T. },;
+        { "iss",    "ISS",     .T. },;
+        { "pis",    "PIS",     !lReform },;
+        { "cofins", "COFINS",  !lReform },;
+        { "cbs",    "CBS",     lReform },;
+        { "ibs",    "IBS",     lReform } }
+
+    for nX := 1 to Len(aTaxes)
+        if jSum[aTaxes[nX][1]] <> 0
+            cLabel := aTaxes[nX][2]
+            if !aTaxes[nX][3]
+                cLabel += " (fora do total)"
+            endIf
+            aAdd(aItems, tdash.core.u_jsonItem(aTaxes[nX][1], cLabel, jSum[aTaxes[nX][1]]))
+        endIf
+    next nX
+return aItems
+
+/*/{Protheus.doc} u_isReformRegime
+Lê o parâmetro taxRegime das rotas do resultado: "reform" soma CBS e IBS no total de impostos; vazio ou "current"
+soma PIS e COFINS.
+@type user function
+@author TDash
+@since 26/10/2026
+@param cRegime, character, valor recebido
+@return logical, .T. no regime da reforma
+/*/
+User Function isReformRegime(cRegime as character) as logical
+return Lower(AllTrim(cRegime)) == "reform"
+
+/*/{Protheus.doc} u_isTaxRegime
+Confere o parâmetro taxRegime: vazio, "current" ou "reform".
+@type user function
+@author TDash
+@since 26/10/2026
+@param cRegime, character, valor recebido
+@return logical, .T. quando é válido
+/*/
+User Function isTaxRegime(cRegime as character) as logical
+    local cValue := Lower(AllTrim(cRegime)) as character
+return Empty(cValue) .or. cValue == "current" .or. cValue == "reform"
+
+/*/{Protheus.doc} u_monthLabel
+Mês AAAA-MM no formato MM/AAAA, para os avisos.
+@type user function
+@author TDash
+@since 26/10/2026
+@param cMonth, character, AAAA-MM
+@return character, MM/AAAA
+/*/
+User Function monthLabel(cMonth as character) as character
+return SubStr(cMonth, 6, 2) + "/" + Left(cMonth, 4)
+
+/*/{Protheus.doc} resultFields
+Campos somados das linhas do resultado.
+@type static function
+@author TDash
+@since 26/10/2026
+@return array, nomes dos campos
+/*/
+Static Function resultFields() as array
+return { "revenue", "cost", "uncosted", "icms", "ipi", "st", "pis", "cofins", "iss", "cbs", "ibs" }

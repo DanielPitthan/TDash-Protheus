@@ -1,0 +1,82 @@
+#include "tlpp-core.th"
+#include "tlpp-probat.th"
+
+namespace tests.core
+
+/*/{Protheus.doc} test_tdash_core_series
+Testes PROBAT do agrupamento das séries (núcleo) (sem banco).
+Execução: appserver.exe -console -consolelog -run=tlpp.probat.run -env={AMBIENTE}
+@type class
+@author TDash
+@since 20/10/2026
+/*/
+@TestFixture()
+Class test_tdash_core_series
+    Public Method New() as Object
+
+    @Test('bucketKey: dia, mês e semana (segunda-feira)')
+    Public Method bucketKey_Grains_ReturnsExpectedKey() as Logical
+
+    @Test('bucketKey: domingo pertence à semana iniciada na segunda anterior')
+    Public Method bucketKey_Sunday_ReturnsPreviousMonday() as Logical
+
+    @Test('groupRows: soma valores da mesma chave e ordena')
+    Public Method groupRows_SameMonth_SumsAndSorts() as Logical
+
+    @Test('groupRows: lista vazia devolve vazio')
+    Public Method groupRows_Empty_ReturnsEmpty() as Logical
+
+    @Test('mergeKeys: união ordenada sem repetição')
+    Public Method mergeKeys_TwoGroups_ReturnsSortedUnion() as Logical
+
+    @Test('valueOf: chave ausente devolve zero')
+    Public Method valueOf_MissingKey_ReturnsZero() as Logical
+EndClass
+
+Method New() as Object Class test_tdash_core_series
+Return Self
+
+Method bucketKey_Grains_ReturnsExpectedKey() as Logical Class test_tdash_core_series
+    // 22/10/2026 é quinta-feira; a segunda-feira da semana é 19/10/2026
+    tlpp.probat.assertEquals(tdash.core.u_bucketKey("20261022", "day"), "2026-10-22")
+    tlpp.probat.assertEquals(tdash.core.u_bucketKey("20261022", "month"), "2026-10")
+    tlpp.probat.assertEquals(tdash.core.u_bucketKey("20261022", "week"), "2026-10-19")
+Return .T.
+
+Method bucketKey_Sunday_ReturnsPreviousMonday() as Logical Class test_tdash_core_series
+    // 25/10/2026 é domingo
+    tlpp.probat.assertEquals(tdash.core.u_bucketKey("20261025", "week"), "2026-10-19")
+    tlpp.probat.assertEquals(tdash.core.u_bucketKey("20261026", "week"), "2026-10-26")
+Return .T.
+
+Method groupRows_SameMonth_SumsAndSorts() as Logical Class test_tdash_core_series
+    Local aGroups := {} as Array
+
+    aGroups := tdash.core.u_groupRows({ { "20261105", 10 }, { "20261020", 5 }, { "20261031", 2.5 } }, "month")
+    tlpp.probat.assertEquals(Len(aGroups), 2)
+    tlpp.probat.assertEquals(aGroups[1][1], "2026-10")
+    tlpp.probat.assertEquals(aGroups[1][2], 7.5)
+    tlpp.probat.assertEquals(aGroups[2][1], "2026-11")
+    tlpp.probat.assertEquals(aGroups[2][2], 10)
+Return .T.
+
+Method groupRows_Empty_ReturnsEmpty() as Logical Class test_tdash_core_series
+    tlpp.probat.assertEquals(Len(tdash.core.u_groupRows({}, "day")), 0)
+Return .T.
+
+Method mergeKeys_TwoGroups_ReturnsSortedUnion() as Logical Class test_tdash_core_series
+    Local aKeys := {} as Array
+
+    aKeys := tdash.core.u_mergeKeys({ { "2026-10-22", 1 }, { "2026-10-24", 1 } }, { { "2026-10-23", 1 }, { "2026-10-22", 9 } })
+    tlpp.probat.assertEquals(Len(aKeys), 3)
+    tlpp.probat.assertEquals(aKeys[1], "2026-10-22")
+    tlpp.probat.assertEquals(aKeys[2], "2026-10-23")
+    tlpp.probat.assertEquals(aKeys[3], "2026-10-24")
+Return .T.
+
+Method valueOf_MissingKey_ReturnsZero() as Logical Class test_tdash_core_series
+    Local aGroups := { { "2026-10", 7.5 } } as Array
+
+    tlpp.probat.assertEquals(tdash.core.u_valueOf(aGroups, "2026-10"), 7.5)
+    tlpp.probat.assertEquals(tdash.core.u_valueOf(aGroups, "2026-11"), 0)
+Return .T.
