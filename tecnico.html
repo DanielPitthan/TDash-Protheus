@@ -1,0 +1,637 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Manual técnico — TDash Protheus</title>
+<meta name="description" content="Instalação, arquitetura, contrato JSON, customização, painéis personalizados, operação e solução de problemas das APIs TLPP do TDash.">
+<meta name="theme-color" content="#0f739c">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/site.css">
+<script src="assets/site.js"></script>
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="index.html">
+      <span class="mark"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="11" width="4" height="10" rx="1"/><rect x="10" y="5" width="4" height="16" rx="1"/><rect x="17" y="8" width="4" height="13" rx="1"/></svg></span>
+      TDASH <small>Protheus</small>
+    </a>
+    <button class="icon-btn menu-btn" id="menuBtn" aria-label="Menu" aria-expanded="false" aria-controls="nav"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+    <nav class="nav" id="nav">
+      <a href="index.html">Início</a>
+      <a href="usuario.html">Manual do usuário</a>
+      <a href="tecnico.html" aria-current="page">Manual técnico</a>
+      <a href="indicadores.html">Indicadores</a>
+      <a href="https://github.com/DanielPitthan/TDash-Protheus">GitHub</a>
+    </nav>
+    <button class="icon-btn" id="themeBtn" aria-label="Alternar tema claro/escuro"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button>
+  </div>
+</header>
+
+<div class="wrap doc-head">
+  <h1>Manual técnico</h1>
+  <p>Para a equipe de TI e desenvolvedores AdvPL/TLPP: como instalar as APIs do TDash no Protheus, o que o app espera de
+    cada rota e como mudar uma regra ou criar um indicador sem quebrar o app.</p>
+</div>
+
+<div class="wrap doc">
+  <nav class="toc" aria-label="Neste manual">
+    <b>Neste manual</b>
+    <a href="#requisitos">Requisitos</a>
+    <a href="#repositorio">O repositório</a>
+    <a href="#instalacao">Instalação</a>
+    <a class="sub" href="#codificacao">Codificação CP1252</a>
+    <a class="sub" href="#smoke">Smoke test</a>
+    <a class="sub" href="#acesso">Acesso por módulo</a>
+    <a href="#arquitetura">Arquitetura</a>
+    <a href="#contrato">Contrato das rotas</a>
+    <a class="sub" href="#kpis">Rota kpis</a>
+    <a class="sub" href="#unidades">Unidades e sentido</a>
+    <a class="sub" href="#erros">Erros</a>
+    <a class="sub" href="#cache">Cache</a>
+    <a href="#parametros">Parâmetros (SX6)</a>
+    <a href="#customizacao">Customização</a>
+    <a class="sub" href="#receita-regra">Mudar uma regra</a>
+    <a class="sub" href="#receita-cartao">Título, unidade, sentido</a>
+    <a class="sub" href="#receita-kpi">Criar um indicador</a>
+    <a class="sub" href="#sql">SQL portável</a>
+    <a href="#painel">Painel personalizado</a>
+    <a href="#testes">Testes PROBAT</a>
+    <a href="#operacao">Operação</a>
+    <a class="sub" href="#conferencia">Conferência</a>
+    <a class="sub" href="#diagnosticos">Diagnósticos</a>
+    <a href="#problemas">Solução de problemas</a>
+    <a href="#checklist">Checklist de publicação</a>
+  </nav>
+
+  <article>
+    <section id="requisitos">
+      <h2>Requisitos</h2>
+      <ul>
+        <li><b>Protheus 12.1.2410</b> ou mais novo, com TLPP habilitado.</li>
+        <li><b>REST do AppServer</b> ativo, com autenticação <b>Basic</b> e acessível pela internet (ou pela VPN dos celulares) em
+          <b>HTTPS</b>. O app recusa <code>http://</code>.</li>
+        <li><b>TDS-VSCode</b> (TOTVS Developer Studio for VS Code) para compilar no RPO.</li>
+        <li>Banco SQL Server, Oracle ou PostgreSQL. As consultas usam SQL portável e <code>ChangeQuery</code>.</li>
+        <li>Opcional: PowerShell 5.1+ para o smoke test.</li>
+      </ul>
+    </section>
+
+    <section id="repositorio">
+      <h2>O repositório</h2>
+      <p>Baixe em <a href="https://github.com/DanielPitthan/TDash-Protheus">github.com/DanielPitthan/TDash-Protheus</a>
+        (<a href="https://github.com/DanielPitthan/TDash-Protheus/archive/refs/heads/main.zip">.zip</a>) ou clone:</p>
+      <pre><code>git clone https://github.com/DanielPitthan/TDash-Protheus.git</code></pre>
+      <pre><code>src/core/    núcleo comum (namespace tdash.core): resposta, consulta, período, parâmetros, catálogo, acesso
+src/fin/     Financeiro          src/fat/   Faturamento        src/com/   Compras
+src/est/     Estoque e Custos    src/pcp/   Produção           src/fis/   Livros Fiscais
+src/ctb/     Contabilidade       src/gpe/   Recursos Humanos
+src/custom/  painéis personalizados de exemplo (namespace tdash.custom)
+tests/       testes PROBAT das regras que não acessam o banco
+tools/       smoke test (PowerShell) e diagnósticos somente leitura (SQL e TLPP)
+openapi/     contrato OpenAPI (tdash-v1.yaml)
+docs/        documentação técnica detalhada, módulo a módulo</code></pre>
+      <p>Cada módulo segue o mesmo padrão:</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Fonte</th><th>Conteúdo</th></tr></thead>
+        <tbody>
+          <tr><td><code>tdash.&lt;mód&gt;.api.tlpp</code></td><td>Classe <code>TDash&lt;Mód&gt;Api</code> com as rotas (<code>@Get</code>), o catálogo (<code>&lt;mód&gt;Catalog()</code>) e o método que calcula cada cartão (<code>kpiValue</code>)</td></tr>
+          <tr><td><code>tdash.&lt;mód&gt;.repository.tlpp</code></td><td>Classe <code>TDash&lt;Mód&gt;Repository</code>, uma consulta por método. Devolve números, arrays ou páginas, nunca JSON</td></tr>
+          <tr><td><code>tdash.&lt;mód&gt;.&lt;regra&gt;.tlpp</code></td><td><code>User Function</code>s de regra pura, testadas com PROBAT (curva ABC, horas da SH6, totalização da visão gerencial, LGPD…)</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <section id="instalacao">
+      <h2>Instalação</h2>
+      <ol class="steps">
+        <li><b>Confira o ambiente.</b> Protheus 12.1.2410+, REST do AppServer ativo com autenticação Basic e HTTPS.</li>
+        <li><b>Compile no RPO</b>, com o TDS-VSCode, nesta ordem:
+          <ol>
+            <li><code>src/core/*.tlpp</code> (os módulos dependem dele);</li>
+            <li><code>src/fin</code>, <code>src/fat</code>, <code>src/com</code>, <code>src/est</code>, <code>src/pcp</code>,
+              <code>src/fis</code>, <code>src/ctb</code>, <code>src/gpe</code>;</li>
+            <li><code>src/custom</code> (depende de <code>src/core</code> e <code>src/fat</code>).</li>
+          </ol>
+          Compile primeiro em homologação.</li>
+        <li><b>Teste uma rota</b> com <code>curl</code>. Nas rotas <code>/core</code>, envie <code>x-erp-module: FAT</code>:
+<pre><code>curl -u USUARIO:SENHA -H "x-erp-module: FAT" https://&lt;servidor&gt;:&lt;porta&gt;/api/tdash/v1/core/branches</code></pre>
+          Esperado: <code>200</code> com <code>items</code> (empresa, filial, nome, CNPJ). Senha errada: <code>401</code>.</li>
+        <li><b>Rode o <a href="#smoke">smoke test</a></b> para conferir todas as rotas de uma vez.</li>
+        <li><b>Contabilidade e RH:</b> rode os <a href="#diagnosticos">diagnósticos</a> e combine com a contabilidade quais visões
+          gerenciais usar, e com o RH quais verbas são hora extra.</li>
+        <li><b>Parâmetros:</b> crie no SX6 só os <a href="#parametros"><code>MV_TD…</code></a> cujo padrão não serve.</li>
+        <li><b>Confira os números</b> de cada módulo contra os <a href="#conferencia">relatórios padrão</a>, na mesma filial e período.</li>
+        <li><b>Libere os módulos</b> aos usuários no Configurador (<a href="#acesso">acesso por módulo</a>).</li>
+        <li><b>Passe aos usuários o endereço do REST</b> (ex.: <code>https://cliente.protheus.cloudtotvs.com.br:1557/api</code>) e o
+          <a href="usuario.html">manual do usuário</a>.</li>
+      </ol>
+
+      <h3 id="codificacao">Codificação CP1252</h3>
+      <p>O compilador do Protheus só aceita <b>Windows-1252</b>. No repositório os fontes ficam em UTF-8 (diff legível no
+        GitHub); o <code>.gitattributes</code> faz o Git entregar em CP1252 com CRLF no checkout:</p>
+      <pre><code>*.tlpp text eol=crlf working-tree-encoding=CP1252
+*.prw  text eol=crlf working-tree-encoding=CP1252
+*.th   text eol=crlf working-tree-encoding=CP1252</code></pre>
+      <div class="callout warn"><p>Baixou o <b>.zip</b> em vez de clonar? O GitHub entrega os arquivos em UTF-8. Antes de compilar,
+        converta para Windows-1252 (no VS Code: <i>Reabrir com codificação › UTF-8</i> e depois <i>Salvar com codificação ›
+        Windows 1252</i>). Acentos trocados (<code>Ã§</code>, <code>Ã£</code>) nas mensagens são sinal de arquivo em UTF-8.
+        Não use caracteres fora do CP1252 (<code>Σ</code>, <code>≥</code>, emojis), nem em comentários.</p></div>
+
+      <h3 id="smoke">Smoke test</h3>
+      <p>Depois de compilar, rode no PowerShell. A senha é pedida no terminal, não aparece e não é gravada:</p>
+      <pre><code>.\tools\smoke-test.ps1 -BaseUrl "https://&lt;cliente&gt;.protheus.cloudtotvs.com.br:1557/api" -User "usuario" -Company "01" -Branch "D MG 01"</code></pre>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Parâmetro</th><th>Para quê</th></tr></thead>
+        <tbody>
+          <tr><td><code>-Module "FIN,PCP"</code></td><td>Só as rotas destes módulos (<code>CUSTOM</code> testa os painéis de exemplo)</td></tr>
+          <tr><td><code>-IncomeView</code> / <code>-BalanceView</code></td><td>Testa a DRE e o Balanço com as visões do cliente</td></tr>
+          <tr><td><code>-OvertimeCodes "179,181"</code></td><td>Testa as horas extras do RH</td></tr>
+          <tr><td><code>-CustomerCode</code> / <code>-SupplierCode</code></td><td>Testa a posição do cliente e do fornecedor</td></tr>
+          <tr><td><code>-OutDir</code></td><td>Pasta dos resultados (padrão <code>.\smoke-results</code>)</td></tr>
+        </tbody>
+      </table></div>
+      <ul>
+        <li>Cada resposta vai para um <code>.json</code> e o resumo para <code>resumo.csv</code> (status e tempo).</li>
+        <li>Esperado: <code>200</code> em todas, exceto os testes propositais de indicador inexistente (<code>404</code>) e de
+          configuração ausente (<code>422</code>).</li>
+        <li>Se a primeira chamada devolver <code>401</code>, o script para, para não bloquear o usuário.</li>
+        <li>Quando uma chamada de <code>kpis</code> devolve <code>500</code>, o script repete um indicador por vez e mostra qual falhou.</li>
+        <li>A pasta de resultados tem dados do cliente: não versione nem envie por canais abertos.</li>
+      </ul>
+
+      <h3 id="acesso">Acesso por módulo</h3>
+      <p>O app mostra só os módulos liberados na aba <b>Menus</b> do cadastro do usuário (SIGACFG › Usuário › Senhas › Usuários) e
+        dos grupos dele. Para liberar um painel, libere o módulo e peça ao usuário para sair e entrar de novo.</p>
+      <ul>
+        <li>Módulo marcado como sem acesso (<code>X</code> no menu) não aparece.</li>
+        <li>"Priorizar configuração do grupo" marcado: valem só os menus dos grupos.</li>
+        <li>É filtro de exibição: o REST do Protheus continua validando usuário, filial e módulo em <b>cada</b> chamada.</li>
+        <li>As rotas <code>/core</code> usam <code>x-erp-module: FAT</code>. Se o REST exigir o módulo do header, o usuário precisa
+          ter o Faturamento liberado para entrar no app.</li>
+        <li>Para investigar, compile <code>tools/diagnostico-acesso.tlpp</code> e execute
+          <code>tdash.tools.u_tdAcessoDiag("login.do.usuario")</code> pelo Configurador › Fórmulas.</li>
+      </ul>
+    </section>
+
+    <section id="arquitetura">
+      <h2>Arquitetura</h2>
+      <pre><code>App TDash
+   │  GET https://&lt;servidor&gt;:&lt;porta&gt;/&lt;raiz REST&gt;/tdash/v1/{módulo}/{rota}
+   │  Authorization: Basic …   tenantid: {empresa},{filial}   x-erp-module: {FIN|FAT|...}
+   ▼
+REST do AppServer
+   │  valida usuário e senha, acesso à filial e ao módulo; abre o ambiente na filial do tenantid
+   ▼
+TDash&lt;Mód&gt;Api (rotas @Get)                     src/&lt;mód&gt;/tdash.&lt;mód&gt;.api.tlpp
+   │  valida parâmetros, procura o indicador no catálogo, monta o JSON
+   ▼
+TDash&lt;Mód&gt;Repository                           src/&lt;mód&gt;/tdash.&lt;mód&gt;.repository.tlpp
+   │  SQL com bind (TDashQuery), sempre por filial e sem registros deletados
+   ▼
+Banco do Protheus</code></pre>
+      <h4>Caminho de uma requisição</h4>
+      <p>Exemplo: <code>GET /tdash/v1/fin/kpis?ids=fin.receivable_open&amp;dateFrom=20261001&amp;dateTo=20261031&amp;compare=prev</code></p>
+      <ol>
+        <li>O REST confere o Basic Auth (senha errada: <code>401</code>, sem chegar ao TDash), troca para a filial do
+          <code>tenantid</code> e abre o módulo do <code>x-erp-module</code>.</li>
+        <li>O REST encontra a rota pela anotação <code>@Get("/tdash/v1/fin/kpis")</code> da classe <code>TDashFinApi</code>.</li>
+        <li><code>getKpis()</code> lê os parâmetros com <code>TDashRequest</code>, valida datas e comparação com <code>TDashPeriod</code>
+          e confere cada id no catálogo com <code>u_findIndicator</code>. Erro: <code>400</code> ou <code>404</code> na hora.</li>
+        <li>Dentro de <code>TRY … CATCH</code>, pede os valores ao repositório, monta cada cartão com <code>u_kpiItem</code> e
+          define o <code>Cache-Control</code> pela validade do indicador.</li>
+        <li><code>oRest:setResponse(oHelper:getResponse(jBody))</code> grava o JSON em UTF-8.</li>
+        <li>Erro inesperado: o <code>CATCH</code> chama <code>oHelper:serverError(...)</code>, que registra no log e responde
+          <code>500</code> com mensagem genérica.</li>
+      </ol>
+      <h4>Núcleo (<code>src/core</code>)</h4>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Fonte</th><th>Conteúdo</th></tr></thead>
+        <tbody>
+          <tr><td><code>tdash.core.api.tlpp</code></td><td><code>TDashCoreApi</code>: <code>GET /core/branches</code> e <code>GET /core/modules</code></td></tr>
+          <tr><td><code>tdash.core.access.tlpp</code></td><td>Módulos liberados ao usuário (<code>PswRet</code>, <code>FWGrpMenu</code>)</td></tr>
+          <tr><td><code>tdash.core.responsehelper.tlpp</code></td><td><code>TDashResponseHelper</code>: JSON de sucesso, erro no modelo TOTVS, <code>Cache-Control</code></td></tr>
+          <tr><td><code>tdash.core.query.tlpp</code></td><td><code>TDashQuery</code>: <code>FWPreparedStatement</code> + <code>ChangeQuery</code> + <code>MPSysOpenQuery</code>, sempre com bind</td></tr>
+          <tr><td><code>tdash.core.period.tlpp</code></td><td><code>TDashPeriod</code>: período e comparação (<code>prev</code> / <code>yoy</code>)</td></tr>
+          <tr><td><code>tdash.core.request.tlpp</code></td><td><code>TDashRequest</code>: query string e path params</td></tr>
+          <tr><td><code>tdash.core.params.tlpp</code></td><td>Validação de datas, inteiros, códigos e listas</td></tr>
+          <tr><td><code>tdash.core.indicators.tlpp</code></td><td>Catálogo, cartão (<code>u_kpiItem</code>), item, ponto, coluna, top N + "Outros"</td></tr>
+          <tr><td><code>tdash.core.series.tlpp</code></td><td>Agrupamento das séries por dia, semana e mês</td></tr>
+          <tr><td><code>tdash.core.panel.tlpp</code></td><td><code>TDashPanelBuilder</code>: JSON dos <a href="#painel">painéis personalizados</a></td></tr>
+        </tbody>
+      </table></div>
+      <h4>Convenções de código</h4>
+      <ul>
+        <li>TLPP tipado (<code>local cNome := "" as character</code>) com prefixo húngaro (<code>c</code>, <code>n</code>, <code>l</code>,
+          <code>d</code>, <code>a</code>, <code>j</code>, <code>o</code>).</li>
+        <li>Só <code>User Function</code> e <code>static function</code>; rotas são métodos de classe com <code>@Get</code>.</li>
+        <li>Todo valor que vem da requisição entra por <b>bind</b> (<code>?</code>), nunca concatenado no SQL. Tabela por
+          <code>RetSqlName()</code>, filial por <code>FWxFilial()</code> de <b>cada</b> tabela, sempre <code>D_E_L_E_T_ = ' '</code>.</li>
+        <li>Sem <code>IIf()</code> (SonarQube CA4000), sem data menos data (use <code>tdash.core.u_daysBetween</code>), sem
+          <code>as variant</code>.</li>
+        <li>Sem <code>return</code> dentro de <code>TRY … CATCH</code>: valide e responda os erros antes do <code>TRY</code>.</li>
+        <li>Todo método tem cabeçalho <code>Protheus.doc</code>.</li>
+      </ul>
+      <h4>Segurança</h4>
+      <ul>
+        <li>Usuário, filial e módulo são validados pelo REST do Protheus antes da API; o TDash não repete a checagem.</li>
+        <li>Parâmetros: datas por <code>u_parseDate</code>, números por <code>u_parseInt</code> com faixa, códigos por
+          <code>u_isSafeCode</code> (letras, dígitos, ponto, hífen e espaço), ids só do catálogo.</li>
+        <li>Erros nunca levam SQL, tabela ou pilha ao app: o detalhe vai para o <code>console.log</code> com <code>FWLogMsg</code>,
+          grupo <b><code>TDASH</code></b>.</li>
+        <li>RH: só números agrupados, com o mínimo de pessoas de <code>MV_TDMINGR</code> (LGPD).</li>
+      </ul>
+    </section>
+
+    <section id="contrato">
+      <h2>Contrato das rotas</h2>
+      <p>Todas as rotas são <code>GET</code>. Cada módulo expõe as mesmas cinco rotas abaixo de <code>/tdash/v1/{mód}</code>:</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Rota</th><th>Devolve</th><th>No app</th></tr></thead>
+        <tbody>
+          <tr><td><code>catalog</code></td><td>Indicadores do módulo, com tipos, título, unidade, sentido e validade</td><td>Smoke test e conferência</td></tr>
+          <tr><td><code>kpis?ids=a,b</code></td><td>Valores dos cartões, com comparação</td><td>Cartões</td></tr>
+          <tr><td><code>series/{id}</code></td><td>Séries no tempo (<code>grain=day|week|month</code>)</td><td>Gráficos</td></tr>
+          <tr><td><code>breakdown/{id}</code></td><td>Composição e rankings (<code>top</code>, <code>dimension</code>)</td><td>Barras</td></tr>
+          <tr><td><code>list/{id}</code></td><td>Lista paginada (<code>page</code>, <code>pageSize</code>)</td><td>Detalhe</td></tr>
+        </tbody>
+      </table></div>
+      <h4>Headers</h4>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Header</th><th>Exemplo</th><th>Observação</th></tr></thead>
+        <tbody>
+          <tr><td><code>Authorization</code></td><td><code>Basic dXN1YXJpbzpzZW5oYQ==</code></td><td>Usuário e senha do Protheus</td></tr>
+          <tr><td><code>tenantid</code></td><td><code>01,1001</code></td><td>Empresa e filial, como vieram de <code>/core/branches</code></td></tr>
+          <tr><td><code>x-erp-module</code></td><td><code>FIN</code></td><td>Sigla do módulo da rota; <code>/core</code> usa <code>FAT</code></td></tr>
+        </tbody>
+      </table></div>
+      <p>Siglas: <code>FIN</code> (fin), <code>FAT</code> (fat), <code>COM</code> (com), <code>EST</code> (est), <code>PCP</code> (pcp),
+        <code>FIS</code> (fis), <code>CTB</code> (ctb), <code>GPE</code> (gpe).</p>
+      <h4>Parâmetros</h4>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Parâmetro</th><th>Formato e limites</th><th>Padrão</th></tr></thead>
+        <tbody>
+          <tr><td><code>ids</code></td><td>1 a 20 ids do catálogo, separados por vírgula</td><td>—</td></tr>
+          <tr><td><code>dateFrom</code>, <code>dateTo</code></td><td><code>AAAAMMDD</code>; no máximo 24 meses</td><td>1º dia do mês atual e hoje</td></tr>
+          <tr><td><code>compare</code></td><td><code>none</code>, <code>prev</code> (período anterior, mesma quantidade de dias) ou <code>yoy</code> (ano anterior)</td><td><code>none</code></td></tr>
+          <tr><td><code>grain</code></td><td><code>day</code>, <code>week</code> ou <code>month</code></td><td><code>day</code> (RH: <code>month</code>)</td></tr>
+          <tr><td><code>top</code></td><td>1 a 50</td><td>10</td></tr>
+          <tr><td><code>page</code>, <code>pageSize</code></td><td><code>page</code> ≥ 1; <code>pageSize</code> 1 a 100</td><td>1 e 20</td></tr>
+          <tr><td><code>view</code></td><td>Visão gerencial (Contabilidade)</td><td>Obrigatório, senão <code>422</code></td></tr>
+          <tr><td><code>overtimeCodes</code></td><td>Até 30 verbas de hora extra (RH)</td><td>Obrigatório, senão <code>422</code></td></tr>
+        </tbody>
+      </table></div>
+
+      <h3 id="kpis">Rota kpis</h3>
+      <pre><code>{
+  "items": [
+    {
+      "id": "fin.receivable_overdue",
+      "title": "A receber vencido",
+      "unit": "BRL",
+      "direction": "down_is_good",
+      "value": 1284300.55,
+      "compare": { "mode": "prev", "value": 1150000.00, "deltaPct": 11.68 },
+      "generatedAt": "2026-10-21T10:15:00",
+      "ttl": 300
+    }
+  ]
+}</code></pre>
+      <ul>
+        <li><b>Não mude o <code>id</code></b> de um indicador existente: é ele que liga o valor ao cartão da tela.</li>
+        <li><code>title</code>, <code>unit</code>, <code>direction</code> e <code>ttl</code> vêm da API e aparecem no app sem atualizá-lo.</li>
+        <li><code>compare</code> é <code>null</code> quando não há comparação; <code>deltaPct</code> é <code>null</code> quando a base é zero.</li>
+        <li><code>hidden: true</code> mostra "—" e "Protegido pela LGPD".</li>
+        <li>Um id fora do catálogo faz a chamada inteira responder <code>404</code>.</li>
+      </ul>
+      <h4>Regras gerais do JSON</h4>
+      <ul>
+        <li>UTF-8, nomes em camelCase, exatamente como no contrato.</li>
+        <li>Números como número JSON, não texto. Valores monetários e percentuais com 2 casas; percentual de 0 a 100
+          (<code>8.4</code> = 8,4%).</li>
+        <li>Datas como <code>AAAA-MM-DD</code>; data/hora como <code>AAAA-MM-DDThh:mm:ss</code>.</li>
+        <li>Campos extras são ignorados pelo app. Campo obrigatório ausente ou de tipo errado mostra "Resposta inválida do servidor".</li>
+      </ul>
+      <p>O contrato completo de cada rota (séries, quebras, listas) está em <code>docs/02-contrato-de-resposta.md</code> e
+        em <code>openapi/tdash-v1.yaml</code>.</p>
+
+      <h3 id="unidades">Unidades e sentido</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th><code>unit</code></th><th>Cartão</th><th>Detalhe</th></tr></thead>
+        <tbody>
+          <tr><td><code>BRL</code></td><td>R$ 1,28 mi · R$ 820 mil</td><td>R$ 48.300,00</td></tr>
+          <tr><td><code>PCT</code></td><td>8,4%</td><td>8,45%</td></tr>
+          <tr><td><code>DAYS</code></td><td>34 dias</td><td>34 dias</td></tr>
+          <tr><td><code>HOURS</code></td><td>12,5 h</td><td>1.240,5 h</td></tr>
+          <tr><td><code>TIMES</code></td><td>3,2x</td><td>3,2x</td></tr>
+          <tr><td><code>PER_HOUR</code></td><td>245,4/h</td><td>1.245,38/h</td></tr>
+          <tr><td><code>QTY</code></td><td>48 mil</td><td>48.200,125</td></tr>
+          <tr><td><code>COUNT</code></td><td>1.284</td><td>1.284</td></tr>
+        </tbody>
+      </table></div>
+      <p><code>direction</code>: <code>up_is_good</code> (subir é verde), <code>down_is_good</code> (cair é verde) ou
+        <code>neutral</code> (sempre cinza).</p>
+
+      <h3 id="erros">Erros</h3>
+      <p>No modelo TOTVS: <code>{ "code", "message", "detailedMessage", "helpUrl" }</code>. O app mostra o <code>message</code>.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Status</th><th>Código</th><th>Causa comum</th></tr></thead>
+        <tbody>
+          <tr><td><code>400</code></td><td><code>TDASH-400-PARAM</code></td><td>Data inválida, período maior que 24 meses, <code>top</code>, <code>page</code> ou código inválido</td></tr>
+          <tr><td><code>401</code></td><td>(REST)</td><td>Usuário ou senha errados, ou usuário bloqueado</td></tr>
+          <tr><td><code>403</code></td><td>(REST)</td><td>Usuário sem acesso à filial ou ao módulo</td></tr>
+          <tr><td><code>404</code></td><td><code>TDASH-404-INDICATOR</code></td><td>Indicador fora do catálogo: APIs desatualizadas em relação ao app</td></tr>
+          <tr><td><code>404</code></td><td><code>TDASH-404-PARTY</code></td><td>Cliente ou fornecedor inexistente na filial</td></tr>
+          <tr><td><code>404</code></td><td>(REST, HTML)</td><td>Rota inexistente: fontes não compilados ou raiz do REST errada</td></tr>
+          <tr><td><code>422</code></td><td><code>TDASH-422-CONFIG</code></td><td>Falta a visão gerencial ou as verbas de hora extra</td></tr>
+          <tr><td><code>500</code></td><td><code>TDASH-500</code></td><td>Erro de execução ou de SQL: procure <code>TDASH</code> no log do AppServer</td></tr>
+        </tbody>
+      </table></div>
+
+      <h3 id="cache">Cache</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Constante</th><th>Segundos</th><th>Uso</th></tr></thead>
+        <tbody>
+          <tr><td><code>TTL_OP</code></td><td>300 (5 min)</td><td>Operacional: saldo bancário, faturamento do dia, OPs atrasadas</td></tr>
+          <tr><td><code>TTL_TAT</code></td><td>1.800 (30 min)</td><td>Tático: mês corrente, carteira, estoque</td></tr>
+          <tr><td><code>TTL_EST</code></td><td>43.200 (12 h)</td><td>Estratégico: contábil, fiscal, RH</td></tr>
+        </tbody>
+      </table></div>
+      <p>O app guarda cada resposta pelo <code>ttl</code> e só volta ao servidor depois disso, ou quando o usuário toca em atualizar.
+        Indicadores pesados devem usar <code>TTL_TAT</code> ou <code>TTL_EST</code>.</p>
+    </section>
+
+    <section id="parametros">
+      <h2>Parâmetros (SX6)</h2>
+      <p>Todos têm valor padrão no código. Crie no SX6 só se precisar mudar o padrão.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Parâmetro</th><th>Padrão</th><th>Módulo</th><th>Efeito</th></tr></thead>
+        <tbody>
+          <tr><td><code>MV_TDSEMMV</code></td><td>180</td><td>Estoque</td><td>Dias sem movimento (estoque parado)</td></tr>
+          <tr><td><code>MV_TDVALID</code></td><td>30</td><td>Estoque</td><td>Janela de lotes a vencer (dias)</td></tr>
+          <tr><td><code>MV_TDMINGR</code></td><td>5</td><td>RH</td><td>Tamanho mínimo de grupo (LGPD)</td></tr>
+          <tr><td><code>MV_TDCATEX</code></td><td><code>A,P</code></td><td>RH</td><td>Categorias (<code>RA_CATFUNC</code>) fora do quadro</td></tr>
+          <tr><td><code>MV_TDROTEX</code></td><td><code>ADI,131,AUT</code></td><td>RH</td><td>Roteiros (<code>RD_ROTEIR</code>) fora da folha</td></tr>
+        </tbody>
+      </table></div>
+      <p>Parâmetros padrão do Protheus que o TDash lê (já existem no ambiente): <code>MV_TPHR</code> (formato do tempo da SH6,
+        Produção), <code>MV_CREDCLI</code> (limite de crédito por loja ou por cliente) e as variáveis do Financeiro
+        <code>MVABATIM</code>, <code>MVPROVIS</code>, <code>MVRECANT</code>, <code>MVPAGANT</code>, <code>MV_CRNEG</code> e
+        <code>MV_CPNEG</code> (tipos de título que não são dívida).</p>
+      <p>Escolhas feitas pelo usuário no app, por servidor e empresa: visão da DRE e do Balanço, verbas de hora extra e favoritos.</p>
+    </section>
+
+    <section id="customizacao">
+      <h2>Customização</h2>
+      <p>Antes de mudar, ache a regra: <code>docs/04-modulos.md</code> lista o fonte e o método de cada indicador, e
+        <code>docs/06-mapa-de-regras.md</code> lista cada regra de negócio, como mudar e o que muda junto.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Mudança</th><th>Só TLPP</th><th>Precisa de versão nova do app</th></tr></thead>
+        <tbody>
+          <tr><td>Regra de cálculo de um indicador existente</td><td>✔</td><td></td></tr>
+          <tr><td>Título, unidade, sentido ou validade de um cartão</td><td>✔</td><td></td></tr>
+          <tr><td>Colunas, rótulos ou tipos de uma lista existente</td><td>✔</td><td></td></tr>
+          <tr><td><b>Painel personalizado</b> (cartões, colunas, barras e tabelas)</td><td>✔</td><td></td></tr>
+          <tr><td>Indicador novo num painel padrão, nova série, novo módulo</td><td></td><td>✔</td></tr>
+        </tbody>
+      </table></div>
+      <div class="callout"><p>Para um processo próprio da empresa, o caminho mais curto é um <a href="#painel">painel personalizado</a>:
+        não depende de versão nova do app. Indicadores novos nos painéis padrão podem ser sugeridos pelo
+        <a href="https://github.com/DanielPitthan/TDash-Protheus/issues">GitHub</a> ou pelo e-mail de contato.</p></div>
+
+      <h3 id="receita-regra">Mudar a regra de um indicador</h3>
+      <p>Exemplo: o faturamento deve contar também as notas de complemento de preço (<code>D2_TIPO = 'C'</code>).</p>
+      <ol>
+        <li><b>Ache a regra.</b> O faturamento está em <code>TDashFatRepository:salesFrom</code>.</li>
+        <li><b>Mude o SQL</b>, mantendo os binds na mesma ordem:
+<pre><code>// antes
+cFrom += " AND D2.D2_TIPO = 'N' "
+// depois
+cFrom += " AND D2.D2_TIPO IN ('N', 'C') "</code></pre>
+          O <code>salesFrom</code> é usado por faturamento, ticket médio, série e rankings: a mudança vale para todos. Se a
+          regra valesse só para um indicador, crie um método novo.</li>
+        <li><b>Valor que muda por cliente?</b> Não deixe fixo: crie um parâmetro <code>MV_TD…</code> e passe por bind.</li>
+        <li><b>Compile</b> <code>src/fat</code>, rode o smoke test com <code>-Module FAT</code> e confira com o relatório padrão.</li>
+      </ol>
+
+      <h3 id="receita-cartao">Mudar título, unidade, sentido ou validade</h3>
+      <p>Tudo está na linha do catálogo do módulo (função <code>&lt;mód&gt;Catalog()</code> no fonte da API):</p>
+      <pre><code>{ "fat.revenue", { "kpi", "series" }, "Faturamento bruto", "BRL", "up_is_good", TTL_OP }
+//  id (não mude)   tipos               título exibido       unid.   sentido       validade</code></pre>
+      <p>Se a unidade mudar, o valor precisa estar na nova unidade (<code>PCT</code> exige número de 0 a 100).</p>
+
+      <h3 id="receita-kpi">Criar um indicador na API</h3>
+      <p>Exemplo: <b>quantidade vendida</b> no Faturamento (<code>fat.items_sold</code>).</p>
+      <p><b>1. Catálogo</b> (<code>src/fat/tdash.fat.api.tlpp</code>, função <code>fatCatalog</code>). O id segue
+        <code>&lt;mód&gt;.&lt;nome_em_ingles&gt;</code>:</p>
+      <pre><code>    { "fat.items_sold", { "kpi" }, "Quantidade vendida", "QTY", "up_is_good", TTL_TAT },;</code></pre>
+      <p><b>2. Cálculo</b> (<code>TDashFatApi:kpiValue</code>). Com <code>compare=prev</code> ou <code>yoy</code>, a API chama
+        <code>kpiValue</code> de novo com o período de comparação e calcula a variação sozinha:</p>
+      <pre><code>        case cId == "fat.items_sold"
+            nValue := oRepo:itemsSold(dFrom, dTo)</code></pre>
+      <p><b>3. Consulta</b> (<code>src/fat/tdash.fat.repository.tlpp</code>):</p>
+      <pre><code>/*/{Protheus.doc} itemsSold
+Quantidade vendida no período (D2_QUANT), com o mesmo filtro do faturamento (salesFrom).
+@type method
+@param dFrom, date, início (D2_EMISSAO)
+@param dTo, date, fim
+@return numeric, quantidade
+/*/
+method itemsSold(dFrom as date, dTo as date) as numeric class TDashFatRepository
+    local nTotal := 0 as numeric
+    local oQuery as object
+
+    oQuery := tdash.core.TDashQuery():new(" SELECT SUM(D2.D2_QUANT) TOTAL " + ::salesFrom(""))
+    ::bindSales(oQuery, dFrom, dTo)
+    if oQuery:open()
+        nTotal := ::numberOf(oQuery:getAlias(), "TOTAL")
+        oQuery:close()
+    endIf
+return nTotal</code></pre>
+      <p><b>4. Teste</b>:</p>
+      <pre><code>curl -u USUARIO:SENHA -H "x-erp-module: FAT" -H "tenantid: 01,1001" "https://&lt;servidor&gt;/api/tdash/v1/fat/kpis?ids=fat.items_sold&amp;dateFrom=20261001&amp;dateTo=20261031&amp;compare=prev"</code></pre>
+      <p>O indicador já responde pela API e pode ser exibido num <a href="#painel">painel personalizado</a>. Para aparecer num painel
+        padrão do app, ele precisa entrar numa versão do app.</p>
+
+      <h3 id="sql">SQL portável e filiais</h3>
+      <ul>
+        <li>Sempre <code>tdash.core.TDashQuery</code> e bind para valores da requisição.</li>
+        <li><b>Cada tabela recebe a filial do seu próprio <code>FWxFilial("XXX")</code></b>, por bind. O tamanho e o compartilhamento
+          da filial mudam de cliente para cliente: nunca fixe tamanho nem valor.</li>
+        <li>Não ligue tabelas de famílias diferentes por <code>A.X_FILIAL = B.Y_FILIAL</code> (ex.: SC1 × SC7). Só entre cabeçalho e
+          itens do mesmo documento (SF2 × SD2).</li>
+        <li>Concatenação com <code>MatiConcat()</code>, nulos com <code>COALESCE</code>, condições com <code>CASE WHEN</code>.</li>
+        <li>Comece os filtros pela filial e pela data, os campos dos índices padrão.</li>
+      </ul>
+    </section>
+
+    <section id="painel">
+      <h2>Painel personalizado</h2>
+      <p>Um endpoint REST seu, no mesmo Protheus, que devolve um JSON padronizado. O usuário cadastra o painel no app (nome,
+        caminho, módulo) e o app monta cartões, gráficos e tabelas <b>na ordem do JSON</b>. Publicar um painel novo não exige
+        versão nova do app.</p>
+      <pre><code>App (Módulos › Painéis personalizados › Adicionar painel)
+  │  GET https://&lt;servidor&gt;:&lt;porta&gt;/&lt;raiz REST&gt;{caminho}[?dateFrom=AAAAMMDD&amp;dateTo=AAAAMMDD]
+  │  Authorization: Basic …   tenantid: {empresa},{filial}   x-erp-module: {módulo escolhido}
+  ▼
+REST do Protheus (valida usuário, filial e módulo)
+  ▼
+Sua classe com @Get → TDashPanelBuilder → { title, ttl, widgets }</code></pre>
+      <h4>Contrato do JSON (v1)</h4>
+      <pre><code>{
+  "title": "Vendas x Devoluções",
+  "ttl": 300,
+  "widgets": [
+    { "type": "kpi", "name": "Faturado", "value": 100, "target": 120, "unit": "BRL", "direction": "up_is_good" },
+    { "type": "columnChart", "name": "Por mês", "axisX": "Mês", "axisY": "R$", "unit": "BRL",
+      "categories": ["Jan", "Fev", "Mar"],
+      "series": [ { "name": "Faturado", "data": [44, 55, 57] } ] },
+    { "type": "barChart", "name": "Por vendedor", "categories": ["Ago"], "series": [ { "name": "João", "data": [44] } ] },
+    { "type": "table", "name": "Top clientes",
+      "columns": [ { "label": "Cliente", "unit": "" }, { "label": "Valor", "unit": "BRL" } ],
+      "data": [ ["ACME", 1200.5] ] }
+  ]
+}</code></pre>
+      <div class="table-wrap"><table>
+        <thead><tr><th><code>type</code></th><th>Campos</th><th>Como aparece</th></tr></thead>
+        <tbody>
+          <tr><td><code>kpi</code></td><td><code>value</code> (obrigatório), <code>target</code>, <code>unit</code>, <code>direction</code></td><td>Cartão; com meta, mostra o percentual atingido</td></tr>
+          <tr><td><code>columnChart</code></td><td><code>categories</code>, <code>series</code>, <code>axisX</code>, <code>axisY</code>, <code>unit</code></td><td>Colunas verticais, uma cor por série</td></tr>
+          <tr><td><code>barChart</code></td><td>os mesmos de <code>columnChart</code></td><td>Barras horizontais</td></tr>
+          <tr><td><code>table</code></td><td><code>columns</code>, <code>data</code></td><td>Tabela com rolagem lateral</td></tr>
+        </tbody>
+      </table></div>
+      <h4>Criar a partir do exemplo</h4>
+      <ol>
+        <li>Copie <code>src/custom/tdash.custom.mock.tlpp</code> para <code>src/custom/tdash.custom.&lt;nome&gt;.tlpp</code>.</li>
+        <li>Troque o nome da classe (<code>TDashCustom&lt;Nome&gt;Api</code>) e a rota do <code>@Get</code>
+          (<code>/tdash/v1/custom/&lt;nome&gt;</code>). Classe e rota precisam ser únicas no RPO.</li>
+        <li>Troque os valores fixos pelas suas consultas. O <code>tdash.custom.exemplo.tlpp</code> mostra isso reaproveitando as
+          consultas do Faturamento.</li>
+        <li>Compile (Windows-1252) e teste com <code>curl</code>.</li>
+        <li>No app: <b>Módulos › Painéis personalizados › Adicionar painel</b>, informe nome, caminho e módulo e toque em <b>Testar</b>.</li>
+      </ol>
+      <pre><code>oPanel := tdash.core.TDashPanelBuilder():new("Meu painel", 300)
+oPanel:addKpiTarget("Faturado", nValor, nMeta, "BRL", "up_is_good")
+oPanel:addColumnChart("Por mês", "Mês", "R$", "BRL", { "Ago", "Set" }, { { "Faturado", { 10, 20 } } })
+oPanel:addTable("Top clientes", { { "Cliente", "" }, { "Valor", "BRL" } }, aRows)
+oHelper:setCacheHeaders(300)
+oRest:setResponse(oHelper:getResponse(oPanel:getJson()))</code></pre>
+      <ul>
+        <li><b>Módulo:</b> para um dos oito módulos do TDash, o painel só aparece a quem pode ver o módulo. Em <b>Outro</b>, o usuário
+          informa qualquer sigla (ex.: <code>MNT</code>, <code>GFE</code>, <code>TMS</code>) e o REST confere o acesso a cada chamada.</li>
+        <li><b>Caminho:</b> relativo à raiz do REST; o app recusa outro servidor, <code>..</code> e <code>#</code>, porque a senha vai junto.</li>
+        <li><b>Limites:</b> 30 widgets, 10 séries, 60 categorias e 200 linhas; acima disso o app corta e avisa. Prefira agregados a
+          listas longas.</li>
+      </ul>
+    </section>
+
+    <section id="testes">
+      <h2>Testes PROBAT</h2>
+      <p>As regras que não acessam o banco (curva ABC, horas da SH6, totalização da visão gerencial, LGPD, painel…) têm testes
+        em <code>tests/</code>. Compile <code>tests/**/*.tlpp</code> num ambiente de desenvolvimento e rode:</p>
+      <pre><code>appserver.exe -console -consolelog -run=tlpp.probat.run -env=NOME_DO_AMBIENTE</code></pre>
+    </section>
+
+    <section id="operacao">
+      <h2>Operação</h2>
+      <h4>Publicar uma versão nova das APIs</h4>
+      <ol>
+        <li>Compile em <b>homologação</b>: <code>src/core</code> e depois os módulos alterados.</li>
+        <li>Rode os testes PROBAT e o smoke test com <code>-Module</code> dos módulos alterados.</li>
+        <li>Compile em <b>produção</b> na mesma ordem.</li>
+        <li>Se a versão do app também mudou, atualize as APIs <b>antes</b> de os usuários atualizarem o app.</li>
+      </ol>
+      <p>Não é preciso reiniciar nada: o usuário vê o número novo quando a validade do cache vence ou ao tocar em atualizar.</p>
+      <h4>Log</h4>
+      <p>Erros vão para o <code>console.log</code> do AppServer que atende o REST, grupo <b><code>TDASH</code></b>, com o contexto
+        <code>Classe:rota</code> (ex.: <code>TDashPcpApi:kpis</code>, <code>TDashQuery:open</code>). O app nunca recebe esse detalhe.</p>
+
+      <h3 id="conferencia">Conferência com o Protheus</h3>
+      <p>Compare sempre na <b>mesma filial</b> e no <b>mesmo período</b>.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Módulo</th><th>Indicador</th><th>Compare com</th></tr></thead>
+        <tbody>
+          <tr><td>Financeiro</td><td>A receber/pagar em aberto e vencido</td><td>Posição de títulos (FINR130/FINR150)</td></tr>
+          <tr><td>Financeiro</td><td>Entradas e saídas realizadas</td><td>Movimentação bancária (FINR620)</td></tr>
+          <tr><td>Financeiro</td><td>Posição do cliente/fornecedor</td><td>FINC010 e FINC030</td></tr>
+          <tr><td>Faturamento</td><td>Faturamento do mês</td><td>Relação de faturamento (MATR550 ou equivalente)</td></tr>
+          <tr><td>Compras</td><td>Volume comprado</td><td>Relação de notas de entrada</td></tr>
+          <tr><td>Estoque</td><td>Valor em estoque</td><td>Posição de estoque (MATR460)</td></tr>
+          <tr><td>Produção</td><td>OPs atrasadas, produção</td><td>Relação de OPs e movimentos internos (SD3)</td></tr>
+          <tr><td>Livros Fiscais</td><td>Débito e crédito de ICMS</td><td>Apuração de ICMS (MATA953)</td></tr>
+          <tr><td>Contabilidade</td><td>DRE e Balanço</td><td>Relatórios da mesma visão gerencial</td></tr>
+          <tr><td>RH</td><td>Quadro e folha</td><td>Relação de funcionários ativos e resumo da folha</td></tr>
+        </tbody>
+      </table></div>
+
+      <h3 id="diagnosticos">Diagnósticos (somente leitura)</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Script</th><th>Para quê</th></tr></thead>
+        <tbody>
+          <tr><td><code>tools/diagnostico-visao-gerencial.sql</code> e <code>-2.sql</code></td><td>Conhecer as visões gerenciais (CVE/CTS) e os saldos da CQ0</td></tr>
+          <tr><td><code>tools/diagnostico-rh.sql</code></td><td>Categorias, motivos de desligamento, ausências, roteiros e verbas que parecem hora extra</td></tr>
+          <tr><td><code>tools/diagnostico-acesso.tlpp</code></td><td>Menus do usuário e dos grupos e os módulos que o TDash libera</td></tr>
+          <tr><td><code>tools/diagnostico-*.sql</code></td><td>Conferências de Compras, Faturamento e Fiscal</td></tr>
+        </tbody>
+      </table></div>
+      <p>Os SQL só fazem <code>SELECT</code> e não trazem dado de pessoa. Troque o sufixo da empresa (<code>010</code>) e os códigos
+        indicados no cabeçalho de cada script.</p>
+    </section>
+
+    <section id="problemas">
+      <h2>Solução de problemas</h2>
+      <h4>Mensagens no app</h4>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Mensagem</th><th>Verifique</th></tr></thead>
+        <tbody>
+          <tr><td>Não foi possível conectar a {servidor}.</td><td>Rede, DNS, porta do REST, certificado HTTPS válido</td></tr>
+          <tr><td>O servidor demorou para responder.</td><td>Mais de 30 s: índices, período longo, consulta nova</td></tr>
+          <tr><td>As APIs do TDash não foram encontradas neste servidor.</td><td>Fontes compilados e raiz do REST (<code>…/api</code>)</td></tr>
+          <tr><td>Resposta inválida do servidor.</td><td>APIs e app de versões diferentes, ou JSON fora do contrato</td></tr>
+          <tr><td>Seu usuário não tem acesso a nenhum módulo do TDash.</td><td>Aba Menus do usuário e dos grupos; <code>u_tdAcessoDiag</code></td></tr>
+        </tbody>
+      </table></div>
+      <h4>Compilação e linter</h4>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Mensagem</th><th>Correção</th></tr></thead>
+        <tbody>
+          <tr><td>Incompatible types between N and D</td><td>Data menos data: use <code>tdash.core.u_daysBetween(dDe, dAte)</code> ou <code>DateDiffDay</code></td></tr>
+          <tr><td>SonarQube CA4000</td><td>Troque <code>IIf()</code> por <code>if … else … endIf</code></td></tr>
+          <tr><td>Syntax Error em <code>Classe():new():metodo()</code></td><td>Guarde o objeto numa variável antes de chamar o método</td></tr>
+          <tr><td>Caracteres trocados (<code>Ã§</code>)</td><td>Arquivo em UTF-8: salve em Windows-1252</td></tr>
+          <tr><td>Função não encontrada (<code>U_…</code>)</td><td>Compile <code>src/core</code> primeiro</td></tr>
+          <tr><td>Variable does not exist: oRest</td><td>Teste pela rota, não chamando o método direto</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <section id="checklist">
+      <h2>Checklist de publicação</h2>
+      <ul>
+        <li>Valores da requisição por bind; filial de cada tabela por <code>FWxFilial</code>; <code>D_E_L_E_T_ = ' '</code>.</li>
+        <li>Ids existentes não mudaram; números como número; percentuais de 0 a 100.</li>
+        <li>Erros respondidos antes do <code>TRY</code>; nenhum detalhe técnico na resposta.</li>
+        <li>Arquivo em Windows-1252; cabeçalho <code>Protheus.doc</code> em métodos novos.</li>
+        <li>Testes PROBAT e smoke test em homologação; números conferidos com o relatório padrão.</li>
+      </ul>
+    </section>
+  </article>
+</div>
+
+<footer>
+  <div class="wrap">
+    <div>
+      <b>TDash Protheus</b> · desenvolvido por Daniel Pitthan Silveira · Az Sistemas<br>
+      Dúvidas e sugestões: <a href="mailto:administrativo@azsistemas.tech">administrativo@azsistemas.tech</a>
+    </div>
+    <div>TOTVS e Protheus são marcas da TOTVS S.A.<br>O TDash não é um produto oficial da TOTVS.</div>
+  </div>
+</footer>
+</body>
+</html>

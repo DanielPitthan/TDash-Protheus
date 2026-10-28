@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Catálogo de indicadores — TDash Protheus</title>
+<meta name="description" content="Todos os indicadores das APIs TLPP do TDash, por módulo: id, título, tipo, unidade, sentido e validade.">
+<meta name="theme-color" content="#0f739c">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/site.css">
+<script src="assets/site.js"></script>
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="index.html">
+      <span class="mark"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="11" width="4" height="10" rx="1"/><rect x="10" y="5" width="4" height="16" rx="1"/><rect x="17" y="8" width="4" height="13" rx="1"/></svg></span>
+      TDASH <small>Protheus</small>
+    </a>
+    <button class="icon-btn menu-btn" id="menuBtn" aria-label="Menu" aria-expanded="false" aria-controls="nav"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+    <nav class="nav" id="nav">
+      <a href="index.html">Início</a>
+      <a href="usuario.html">Manual do usuário</a>
+      <a href="tecnico.html">Manual técnico</a>
+      <a href="indicadores.html" aria-current="page">Indicadores</a>
+      <a href="https://github.com/DanielPitthan/TDash-Protheus">GitHub</a>
+    </nav>
+    <button class="icon-btn" id="themeBtn" aria-label="Alternar tema claro/escuro"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button>
+  </div>
+</header>
+
+<div class="wrap doc-head">
+  <h1>Catálogo de indicadores</h1>
+  <p>121 indicadores, lidos dos catálogos dos fontes (<code>&lt;mód&gt;Catalog()</code>). O <b>id</b> é o que vai na rota;
+    os tipos dizem por quais rotas ele responde: <code>kpi</code> (cartão), <code>series</code> (gráfico), <code>breakdown</code>
+    (barras) e <code>list</code> (detalhe). A fórmula de cada um está no cabeçalho do método do repositório, e o mapa das regras
+    em <code>docs/06-mapa-de-regras.md</code>.</p>
+</div>
+
+<main class="wrap" style="padding-bottom:80px">
+  <div class="filter">
+    <input id="kpiSearch" type="search" placeholder="Buscar por nome ou id (ex.: vencido, fat.revenue)" aria-label="Buscar indicador">
+  </div>
+  <div class="filter" role="group" aria-label="Filtrar por módulo">
+        <button class="chip" data-filter="all" aria-pressed="true">Todos</button>
+        <button class="chip" data-filter="FIN" aria-pressed="false">Financeiro</button>
+        <button class="chip" data-filter="FAT" aria-pressed="false">Faturamento</button>
+        <button class="chip" data-filter="COM" aria-pressed="false">Compras</button>
+        <button class="chip" data-filter="EST" aria-pressed="false">Estoque e Custos</button>
+        <button class="chip" data-filter="PCP" aria-pressed="false">Produção</button>
+        <button class="chip" data-filter="FIS" aria-pressed="false">Livros Fiscais</button>
+        <button class="chip" data-filter="CTB" aria-pressed="false">Contabilidade</button>
+        <button class="chip" data-filter="GPE" aria-pressed="false">Recursos Humanos</button>
+  </div>
+
+  <div class="grid g2" style="margin-bottom:32px">
+    <div class="table-wrap" style="margin:0"><table>
+      <thead><tr><th>Validade</th><th>Uso</th></tr></thead>
+      <tbody>
+        <tr><td>5 min</td><td>Operacional (saldos, vencidos, OPs)</td></tr>
+        <tr><td>30 min</td><td>Tático (mês corrente, carteira, estoque)</td></tr>
+        <tr><td>12 h</td><td>Estratégico (contábil, fiscal, RH)</td></tr>
+      </tbody>
+    </table></div>
+    <div class="table-wrap" style="margin:0"><table>
+      <thead><tr><th>Sentido</th><th>Cor da variação</th></tr></thead>
+      <tbody>
+        <tr><td><code>up_is_good</code></td><td>Subir é verde</td></tr>
+        <tr><td><code>down_is_good</code></td><td>Cair é verde</td></tr>
+        <tr><td><code>neutral</code></td><td>Sempre cinza</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+
+    <section data-module="FIN" id="fin">
+      <h2>Financeiro <span class="kind">FIN</span></h2>
+      <p class="note">Abas no app: Receber · Pagar · Caixa · 29 indicadores · rotas <code>/tdash/v1/fin/…</code></p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>id</th><th>Título</th><th>Tipos</th><th>Unidade</th><th>Sentido</th><th>Validade</th></tr></thead>
+        <tbody>
+          <tr><td><code>fin.bank_balance</code></td><td>Saldo bancário</td><td><span class="kind">kpi</span><span class="kind">breakdown</span></td><td><code>BRL</code></td><td><code>up_is_good</code></td><td>5 min</td></tr>
+          <tr><td><code>fin.receivable_open</code></td><td>A receber em aberto</td><td><span class="kind">kpi</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>5 min</td></tr>
+          <tr><td><code>fin.receivable_overdue</code></td><td>A receber vencido</td><td><span class="kind">kpi</span></td><td><code>BRL</code></td><td><code>down_is_good</code></td><td>5 min</td></tr>
+          <tr><td><code>fin.receivable_due</code></td><td>A receber em 30 dias</td><td><span class="kind">kpi</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>5 min</td></tr>
+          <tr><td><code>fin.payable_open</code></td><td>A pagar em aberto</td><td><span class="kind">kpi</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>5 min</td></tr>
+          <tr><td><code>fin.payable_overdue</code></td><td>A pagar vencido</td><td><span class="kind">kpi</span></td><td><code>BRL</code></td><td><code>down_is_good</code></td><td>5 min</td></tr>
+          <tr><td><code>fin.payable_due</code></td><td>A pagar em 30 dias</td><td><span class="kind">kpi</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>5 min</td></tr>
+          <tr><td><code>fin.default_rate</code></td><td>Inadimplência</td><td><span class="kind">kpi</span></td><td><code>PCT</code></td><td><code>down_is_good</code></td><td>30 min</td></tr>
+          <tr><td><code>fin.dso</code></td><td>Prazo médio de recebimento</td><td><span class="kind">kpi</span></td><td><code>DAYS</code></td><td><code>down_is_good</code></td><td>12 h</td></tr>
+          <tr><td><code>fin.dpo</code></td><td>Prazo médio de pagamento</td><td><span class="kind">kpi</span></td><td><code>DAYS</code></td><td><code>up_is_good</code></td><td>12 h</td></tr>
+          <tr><td><code>fin.cashflow_projection</code></td><td>Fluxo de caixa projetado</td><td><span class="kind">series</span></td><td><code>BRL</code></td><td><code>up_is_good</code></td><td>30 min</td></tr>
+          <tr><td><code>fin.cash_realized</code></td><td>Entradas e saídas realizadas</td><td><span class="kind">series</span></td><td><code>BRL</code></td><td><code>up_is_good</code></td><td>30 min</td></tr>
+          <tr><td><code>fin.aging_receivable</code></td><td>Vencidos a receber por atraso</td><td><span class="kind">breakdown</span></td><td><code>BRL</code></td><td><code>down_is_good</code></td><td>30 min</td></tr>
+          <tr><td><code>fin.aging_payable</code></td><td>Vencidos a pagar por atraso</td><td><span class="kind">breakdown</span></td><td><code>BRL</code></td><td><code>down_is_good</code></td><td>30 min</td></tr>
+          <tr><td><code>fin.top_debtors</code></td><td>Maiores devedores</td><td><span class="kind">breakdown</span></td><td><code>BRL</code></td><td><code>down_is_good</code></td><td>30 min</td></tr>
+          <tr><td><code>fin.top_creditors</code></td><td>Maiores pagamentos em 30 dias</td><td><span class="kind">breakdown</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>30 min</td></tr>
+          <tr><td><code>fin.cash_by_bank</code></td><td>Resultado do caixa por conta</td><td><span class="kind">breakdown</span></td><td><code>BRL</code></td><td><code>up_is_good</code></td><td>30 min</td></tr>
+          <tr><td><code>fin.overdue_receivables</code></td><td>Títulos a receber vencidos</td><td><span class="kind">list</span></td><td><code>BRL</code></td><td><code>down_is_good</code></td><td>5 min</td></tr>
+          <tr><td><code>fin.overdue_payables</code></td><td>Títulos a pagar vencidos</td><td><span class="kind">list</span></td><td><code>BRL</code></td><td><code>down_is_good</code></td><td>5 min</td></tr>
+          <tr><td><code>fin.party_search</code></td><td>Buscar cliente ou fornecedor</td><td><span class="kind">list</span></td><td><code>COUNT</code></td><td><code>neutral</code></td><td>30 min</td></tr>
+          <tr><td><code>fin.party_open</code></td><td>Em aberto</td><td><span class="kind">kpi</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>5 min</td></tr>
+          <tr><td><code>fin.party_overdue</code></td><td>Vencido</td><td><span class="kind">kpi</span></td><td><code>BRL</code></td><td><code>down_is_good</code></td><td>5 min</td></tr>
+          <tr><td><code>fin.party_not_due</code></td><td>A vencer</td><td><span class="kind">kpi</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>5 min</td></tr>
+          <tr><td><code>fin.party_credit_limit</code></td><td>Limite de crédito</td><td><span class="kind">kpi</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>30 min</td></tr>
+          <tr><td><code>fin.party_credit_available</code></td><td>Crédito disponível</td><td><span class="kind">kpi</span></td><td><code>BRL</code></td><td><code>up_is_good</code></td><td>5 min</td></tr>
+          <tr><td><code>fin.party_settled</code></td><td>Recebido ou pago no período</td><td><span class="kind">kpi</span><span class="kind">series</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>30 min</td></tr>
+          <tr><td><code>fin.party_aging</code></td><td>Vencido por atraso</td><td><span class="kind">breakdown</span></td><td><code>BRL</code></td><td><code>down_is_good</code></td><td>5 min</td></tr>
+          <tr><td><code>fin.party_titles</code></td><td>Títulos em aberto</td><td><span class="kind">list</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>5 min</td></tr>
+          <tr><td><code>fin.party_stores</code></td><td>Cadastro e histórico por loja</td><td><span class="kind">list</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>30 min</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <section data-module="FAT" id="fat">
+      <h2>Faturamento <span class="kind">FAT</span></h2>
+      <p class="note">Abas no app: Vendas · Resultado · Carteira · Rankings · 16 indicadores · rotas <code>/tdash/v1/fat/…</code></p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>id</th><th>Título</th><th>Tipos</th><th>Unidade</th><th>Sentido</th><th>Validade</th></tr></thead>
+        <tbody>
+          <tr><td><code>fat.revenue</code></td><td>Faturamento bruto</td><td><span class="kind">kpi</span><span class="kind">series</span></td><td><code>BRL</code></td><td><code>up_is_good</code></td><td>5 min</td></tr>
+          <tr><td><code>fat.revenue_net</code></td><td>Faturamento líquido</td><td><span class="kind">kpi</span></td><td><code>BRL</code></td><td><code>up_is_good</code></td><td>30 min</td></tr>
+          <tr><td><code>fat.invoice_count</code></td><td>Notas fiscais emitidas</td><td><span class="kind">kpi</span></td><td><code>COUNT</code></td><td><code>up_is_good</code></td><td>5 min</td></tr>
+          <tr><td><code>fat.avg_ticket</code></td><td>Ticket médio por nota</td><td><span class="kind">kpi</span></td><td><code>BRL</code></td><td><code>up_is_good</code></td><td>30 min</td></tr>
+          <tr><td><code>fat.returns</code></td><td>Devoluções</td><td><span class="kind">kpi</span></td><td><code>BRL</code></td><td><code>down_is_good</code></td><td>30 min</td></tr>
+          <tr><td><code>fat.target_attainment</code></td><td>Meta x realizado</td><td><span class="kind">kpi</span></td><td><code>PCT</code></td><td><code>up_is_good</code></td><td>30 min</td></tr>
+          <tr><td><code>fat.backlog</code></td><td>Carteira de pedidos</td><td><span class="kind">kpi</span><span class="kind">list</span></td><td><code>BRL</code></td><td><code>up_is_good</code></td><td>5 min</td></tr>
+          <tr><td><code>fat.top_customers</code></td><td>Maiores clientes</td><td><span class="kind">breakdown</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>30 min</td></tr>
+          <tr><td><code>fat.top_products</code></td><td>Produtos mais vendidos</td><td><span class="kind">breakdown</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>30 min</td></tr>
+          <tr><td><code>fat.by_seller</code></td><td>Faturamento por vendedor</td><td><span class="kind">breakdown</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>30 min</td></tr>
+          <tr><td><code>fat.by_state</code></td><td>Faturamento por UF</td><td><span class="kind">breakdown</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>12 h</td></tr>
+          <tr><td><code>fat.gross_profit</code></td><td>Lucro bruto</td><td><span class="kind">kpi</span></td><td><code>BRL</code></td><td><code>up_is_good</code></td><td>30 min</td></tr>
+          <tr><td><code>fat.net_profit</code></td><td>Lucro líquido</td><td><span class="kind">kpi</span></td><td><code>BRL</code></td><td><code>up_is_good</code></td><td>30 min</td></tr>
+          <tr><td><code>fat.taxes</code></td><td>Impostos sobre vendas</td><td><span class="kind">kpi</span></td><td><code>BRL</code></td><td><code>down_is_good</code></td><td>30 min</td></tr>
+          <tr><td><code>fat.result</code></td><td>Lucro bruto, lucro líquido e impostos</td><td><span class="kind">series</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>30 min</td></tr>
+          <tr><td><code>fat.taxes_by_type</code></td><td>Impostos por tipo</td><td><span class="kind">breakdown</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>30 min</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <section data-module="COM" id="com">
+      <h2>Compras <span class="kind">COM</span></h2>
+      <p class="note">Abas no app: Compras · Pedidos · Solicitações · Acompanhamento · 15 indicadores · rotas <code>/tdash/v1/com/…</code></p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>id</th><th>Título</th><th>Tipos</th><th>Unidade</th><th>Sentido</th><th>Validade</th></tr></thead>
+        <tbody>
+          <tr><td><code>com.purchases</code></td><td>Valor comprado</td><td><span class="kind">kpi</span><span class="kind">series</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>30 min</td></tr>
+          <tr><td><code>com.po_open</code></td><td>Pedidos de compra em aberto</td><td><span class="kind">kpi</span><span class="kind">list</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>5 min</td></tr>
+          <tr><td><code>com.po_late</code></td><td>Pedidos com entrega atrasada</td><td><span class="kind">kpi</span><span class="kind">list</span></td><td><code>BRL</code></td><td><code>down_is_good</code></td><td>5 min</td></tr>
+          <tr><td><code>com.po_awaiting_approval</code></td><td>Pedidos aguardando aprovação</td><td><span class="kind">kpi</span><span class="kind">list</span></td><td><code>BRL</code></td><td><code>down_is_good</code></td><td>5 min</td></tr>
+          <tr><td><code>com.pr_pending</code></td><td>Itens de solicitação pendentes</td><td><span class="kind">kpi</span><span class="kind">list</span></td><td><code>COUNT</code></td><td><code>down_is_good</code></td><td>5 min</td></tr>
+          <tr><td><code>com.lead_time_request</code></td><td>Prazo solicitação até pedido</td><td><span class="kind">kpi</span></td><td><code>DAYS</code></td><td><code>down_is_good</code></td><td>12 h</td></tr>
+          <tr><td><code>com.lead_time_delivery</code></td><td>Prazo pedido até entrega</td><td><span class="kind">kpi</span></td><td><code>DAYS</code></td><td><code>down_is_good</code></td><td>12 h</td></tr>
+          <tr><td><code>com.top_suppliers</code></td><td>Maiores fornecedores</td><td><span class="kind">breakdown</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>30 min</td></tr>
+          <tr><td><code>com.price_evolution</code></td><td>Preço médio dos itens mais comprados</td><td><span class="kind">series</span></td><td><code>BRL</code></td><td><code>down_is_good</code></td><td>12 h</td></tr>
+          <tr><td><code>com.trace_requested</code></td><td>Solicitado (a preço de pedido)</td><td><span class="kind">kpi</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>30 min</td></tr>
+          <tr><td><code>com.trace_ordered</code></td><td>Virou pedido</td><td><span class="kind">kpi</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>30 min</td></tr>
+          <tr><td><code>com.trace_delivered</code></td><td>Entregue (notas de entrada)</td><td><span class="kind">kpi</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>30 min</td></tr>
+          <tr><td><code>com.trace_unordered</code></td><td>Itens de solicitação sem pedido</td><td><span class="kind">kpi</span></td><td><code>COUNT</code></td><td><code>down_is_good</code></td><td>30 min</td></tr>
+          <tr><td><code>com.trace</code></td><td>Solicitado x pedido x entregue</td><td><span class="kind">series</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>30 min</td></tr>
+          <tr><td><code>com.trace_items</code></td><td>Acompanhamento por item</td><td><span class="kind">list</span></td><td><code>QTY</code></td><td><code>neutral</code></td><td>30 min</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <section data-module="EST" id="est">
+      <h2>Estoque e Custos <span class="kind">EST</span></h2>
+      <p class="note">Abas no app: Valor · Reposição · Validade · 9 indicadores · rotas <code>/tdash/v1/est/…</code></p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>id</th><th>Título</th><th>Tipos</th><th>Unidade</th><th>Sentido</th><th>Validade</th></tr></thead>
+        <tbody>
+          <tr><td><code>est.stock_value</code></td><td>Valor em estoque</td><td><span class="kind">kpi</span><span class="kind">breakdown</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>30 min</td></tr>
+          <tr><td><code>est.below_reorder</code></td><td>Produtos abaixo do ponto de pedido</td><td><span class="kind">kpi</span><span class="kind">list</span></td><td><code>COUNT</code></td><td><code>down_is_good</code></td><td>5 min</td></tr>
+          <tr><td><code>est.coverage_days</code></td><td>Cobertura de estoque</td><td><span class="kind">kpi</span></td><td><code>DAYS</code></td><td><code>neutral</code></td><td>12 h</td></tr>
+          <tr><td><code>est.turnover</code></td><td>Giro de estoque</td><td><span class="kind">kpi</span></td><td><code>TIMES</code></td><td><code>up_is_good</code></td><td>12 h</td></tr>
+          <tr><td><code>est.no_movement</code></td><td>Itens sem movimento</td><td><span class="kind">kpi</span><span class="kind">list</span></td><td><code>COUNT</code></td><td><code>down_is_good</code></td><td>12 h</td></tr>
+          <tr><td><code>est.abc_curve</code></td><td>Curva ABC do estoque</td><td><span class="kind">breakdown</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>12 h</td></tr>
+          <tr><td><code>est.lots_expiring</code></td><td>Lotes vencidos ou a vencer</td><td><span class="kind">kpi</span><span class="kind">list</span></td><td><code>COUNT</code></td><td><code>down_is_good</code></td><td>5 min</td></tr>
+          <tr><td><code>est.cogs</code></td><td>Custo da mercadoria vendida</td><td><span class="kind">kpi</span><span class="kind">series</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>30 min</td></tr>
+          <tr><td><code>est.avg_cost_evolution</code></td><td>Custo médio dos itens de maior valor</td><td><span class="kind">series</span></td><td><code>BRL</code></td><td><code>down_is_good</code></td><td>12 h</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <section data-module="PCP" id="pcp">
+      <h2>Produção <span class="kind">PCP</span></h2>
+      <p class="note">Abas no app: Visão geral · OPs · Apontamentos · Matéria-prima · 18 indicadores · rotas <code>/tdash/v1/pcp/…</code></p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>id</th><th>Título</th><th>Tipos</th><th>Unidade</th><th>Sentido</th><th>Validade</th></tr></thead>
+        <tbody>
+          <tr><td><code>pcp.po_open</code></td><td>OPs abertas</td><td><span class="kind">kpi</span></td><td><code>COUNT</code></td><td><code>neutral</code></td><td>5 min</td></tr>
+          <tr><td><code>pcp.po_late</code></td><td>OPs atrasadas</td><td><span class="kind">kpi</span><span class="kind">list</span></td><td><code>COUNT</code></td><td><code>down_is_good</code></td><td>5 min</td></tr>
+          <tr><td><code>pcp.po_closed</code></td><td>OPs encerradas</td><td><span class="kind">kpi</span></td><td><code>COUNT</code></td><td><code>up_is_good</code></td><td>30 min</td></tr>
+          <tr><td><code>pcp.plan_attainment</code></td><td>Atingimento do plano</td><td><span class="kind">kpi</span></td><td><code>PCT</code></td><td><code>up_is_good</code></td><td>30 min</td></tr>
+          <tr><td><code>pcp.production_daily</code></td><td>Produção</td><td><span class="kind">series</span></td><td><code>QTY</code></td><td><code>up_is_good</code></td><td>5 min</td></tr>
+          <tr><td><code>pcp.losses</code></td><td>Perdas na produção</td><td><span class="kind">kpi</span><span class="kind">series</span></td><td><code>PCT</code></td><td><code>down_is_good</code></td><td>30 min</td></tr>
+          <tr><td><code>pcp.hours_by_resource</code></td><td>Horas por recurso</td><td><span class="kind">breakdown</span></td><td><code>HOURS</code></td><td><code>neutral</code></td><td>12 h</td></tr>
+          <tr><td><code>pcp.hours</code></td><td>Horas apontadas</td><td><span class="kind">kpi</span><span class="kind">series</span></td><td><code>HOURS</code></td><td><code>neutral</code></td><td>30 min</td></tr>
+          <tr><td><code>pcp.productivity</code></td><td>Produção por hora</td><td><span class="kind">breakdown</span></td><td><code>PER_HOUR</code></td><td><code>up_is_good</code></td><td>30 min</td></tr>
+          <tr><td><code>pcp.top_products</code></td><td>Produtos mais produzidos</td><td><span class="kind">breakdown</span></td><td><code>QTY</code></td><td><code>neutral</code></td><td>30 min</td></tr>
+          <tr><td><code>pcp.material_reserved</code></td><td>Matéria-prima empenhada</td><td><span class="kind">kpi</span></td><td><code>QTY</code></td><td><code>neutral</code></td><td>30 min</td></tr>
+          <tr><td><code>pcp.material_consumed</code></td><td>Matéria-prima consumida</td><td><span class="kind">kpi</span></td><td><code>QTY</code></td><td><code>neutral</code></td><td>30 min</td></tr>
+          <tr><td><code>pcp.material_produced</code></td><td>Produzido nas OPs encerradas</td><td><span class="kind">kpi</span></td><td><code>QTY</code></td><td><code>up_is_good</code></td><td>30 min</td></tr>
+          <tr><td><code>pcp.material_loss</code></td><td>Perda de material</td><td><span class="kind">kpi</span></td><td><code>QTY</code></td><td><code>down_is_good</code></td><td>30 min</td></tr>
+          <tr><td><code>pcp.material_loss_rate</code></td><td>Perda de material (%)</td><td><span class="kind">kpi</span></td><td><code>PCT</code></td><td><code>down_is_good</code></td><td>30 min</td></tr>
+          <tr><td><code>pcp.material_returned</code></td><td>Empenho devolvido ao estoque</td><td><span class="kind">kpi</span></td><td><code>QTY</code></td><td><code>neutral</code></td><td>30 min</td></tr>
+          <tr><td><code>pcp.material_loss_by_product</code></td><td>Perda de material por produto</td><td><span class="kind">breakdown</span></td><td><code>QTY</code></td><td><code>down_is_good</code></td><td>30 min</td></tr>
+          <tr><td><code>pcp.material_orders</code></td><td>Matéria-prima por OP</td><td><span class="kind">list</span></td><td><code>QTY</code></td><td><code>neutral</code></td><td>30 min</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <section data-module="FIS" id="fis">
+      <h2>Livros Fiscais <span class="kind">FIS</span></h2>
+      <p class="note">Abas no app: Visão geral · Centralização · Apuração · CFOP · Canceladas · 18 indicadores · rotas <code>/tdash/v1/fis/…</code></p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>id</th><th>Título</th><th>Tipos</th><th>Unidade</th><th>Sentido</th><th>Validade</th></tr></thead>
+        <tbody>
+          <tr><td><code>fis.icms_balance</code></td><td>Saldo de ICMS (débito - crédito)</td><td><span class="kind">kpi</span><span class="kind">series</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>12 h</td></tr>
+          <tr><td><code>fis.ipi_balance</code></td><td>Saldo de IPI (débito - crédito)</td><td><span class="kind">kpi</span><span class="kind">series</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>12 h</td></tr>
+          <tr><td><code>fis.pis_cofins</code></td><td>Saldo de PIS e COFINS (débito - crédito)</td><td><span class="kind">kpi</span><span class="kind">series</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>12 h</td></tr>
+          <tr><td><code>fis.iss</code></td><td>ISS das notas de serviço</td><td><span class="kind">kpi</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>12 h</td></tr>
+          <tr><td><code>fis.icms_st</code></td><td>ICMS ST retido</td><td><span class="kind">kpi</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>12 h</td></tr>
+          <tr><td><code>fis.difal</code></td><td>DIFAL</td><td><span class="kind">kpi</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>12 h</td></tr>
+          <tr><td><code>fis.by_cfop</code></td><td>Valor contábil por CFOP</td><td><span class="kind">breakdown</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>12 h</td></tr>
+          <tr><td><code>fis.by_state</code></td><td>Saídas por UF</td><td><span class="kind">breakdown</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>12 h</td></tr>
+          <tr><td><code>fis.cancelled</code></td><td>Notas canceladas</td><td><span class="kind">kpi</span><span class="kind">list</span></td><td><code>COUNT</code></td><td><code>down_is_good</code></td><td>12 h</td></tr>
+          <tr><td><code>fis.tax_burden</code></td><td>Carga tributária das saídas</td><td><span class="kind">kpi</span></td><td><code>PCT</code></td><td><code>down_is_good</code></td><td>30 min</td></tr>
+          <tr><td><code>fis.ledger_debit</code></td><td>Débitos de tributos (sem CBS e IBS)</td><td><span class="kind">kpi</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>30 min</td></tr>
+          <tr><td><code>fis.ledger_credit</code></td><td>Créditos de tributos (sem CBS e IBS)</td><td><span class="kind">kpi</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>30 min</td></tr>
+          <tr><td><code>fis.ledger_balance</code></td><td>Saldo dos tributos (débito - crédito)</td><td><span class="kind">kpi</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>30 min</td></tr>
+          <tr><td><code>fis.ledger_trend</code></td><td>Débitos x créditos de tributos</td><td><span class="kind">series</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>30 min</td></tr>
+          <tr><td><code>fis.ledger</code></td><td>Centralização de débitos e créditos</td><td><span class="kind">list</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>30 min</td></tr>
+          <tr><td><code>fis.top_parties</code></td><td>Clientes e fornecedores por tributos</td><td><span class="kind">breakdown</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>30 min</td></tr>
+          <tr><td><code>fis.top_ncm</code></td><td>NCM das saídas por tributos</td><td><span class="kind">breakdown</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>30 min</td></tr>
+          <tr><td><code>fis.by_state_in</code></td><td>Entradas por UF</td><td><span class="kind">breakdown</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>12 h</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <section data-module="CTB" id="ctb">
+      <h2>Contabilidade <span class="kind">CTB</span></h2>
+      <p class="note">Abas no app: DRE · Balanço · 4 indicadores · rotas <code>/tdash/v1/ctb/…</code></p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>id</th><th>Título</th><th>Tipos</th><th>Unidade</th><th>Sentido</th><th>Validade</th></tr></thead>
+        <tbody>
+          <tr><td><code>ctb.views</code></td><td>Visões gerenciais</td><td><span class="kind">list</span></td><td><code>COUNT</code></td><td><code>neutral</code></td><td>12 h</td></tr>
+          <tr><td><code>ctb.view_lines</code></td><td>Linhas da visão</td><td><span class="kind">list</span></td><td><code>COUNT</code></td><td><code>neutral</code></td><td>12 h</td></tr>
+          <tr><td><code>ctb.income_statement</code></td><td>DRE</td><td><span class="kind">breakdown</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>12 h</td></tr>
+          <tr><td><code>ctb.balance_sheet</code></td><td>Balanço patrimonial</td><td><span class="kind">breakdown</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>12 h</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <section data-module="GPE" id="gpe">
+      <h2>Recursos Humanos <span class="kind">GPE</span></h2>
+      <p class="note">Abas no app: Quadro · Folha · Afastamentos · 12 indicadores · rotas <code>/tdash/v1/gpe/…</code></p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>id</th><th>Título</th><th>Tipos</th><th>Unidade</th><th>Sentido</th><th>Validade</th></tr></thead>
+        <tbody>
+          <tr><td><code>gpe.headcount</code></td><td>Funcionários ativos</td><td><span class="kind">kpi</span><span class="kind">breakdown</span></td><td><code>COUNT</code></td><td><code>neutral</code></td><td>12 h</td></tr>
+          <tr><td><code>gpe.hires</code></td><td>Admissões</td><td><span class="kind">kpi</span></td><td><code>COUNT</code></td><td><code>neutral</code></td><td>12 h</td></tr>
+          <tr><td><code>gpe.terminations</code></td><td>Desligamentos</td><td><span class="kind">kpi</span></td><td><code>COUNT</code></td><td><code>down_is_good</code></td><td>12 h</td></tr>
+          <tr><td><code>gpe.turnover</code></td><td>Turnover</td><td><span class="kind">kpi</span></td><td><code>PCT</code></td><td><code>down_is_good</code></td><td>12 h</td></tr>
+          <tr><td><code>gpe.movements</code></td><td>Admissões e desligamentos</td><td><span class="kind">series</span></td><td><code>COUNT</code></td><td><code>neutral</code></td><td>12 h</td></tr>
+          <tr><td><code>gpe.absenteeism</code></td><td>Absenteísmo</td><td><span class="kind">kpi</span><span class="kind">breakdown</span></td><td><code>PCT</code></td><td><code>down_is_good</code></td><td>12 h</td></tr>
+          <tr><td><code>gpe.payroll</code></td><td>Folha de pagamento</td><td><span class="kind">kpi</span><span class="kind">series</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>12 h</td></tr>
+          <tr><td><code>gpe.payroll_by_cc</code></td><td>Folha por centro de custo</td><td><span class="kind">breakdown</span></td><td><code>BRL</code></td><td><code>neutral</code></td><td>12 h</td></tr>
+          <tr><td><code>gpe.overtime</code></td><td>Horas extras</td><td><span class="kind">kpi</span><span class="kind">series</span></td><td><code>BRL</code></td><td><code>down_is_good</code></td><td>12 h</td></tr>
+          <tr><td><code>gpe.overtime_hours</code></td><td>Horas extras (horas)</td><td><span class="kind">kpi</span></td><td><code>HOURS</code></td><td><code>down_is_good</code></td><td>12 h</td></tr>
+          <tr><td><code>gpe.demographics</code></td><td>Perfil do quadro</td><td><span class="kind">breakdown</span></td><td><code>COUNT</code></td><td><code>neutral</code></td><td>12 h</td></tr>
+          <tr><td><code>gpe.payroll_codes</code></td><td>Verbas de provento</td><td><span class="kind">list</span></td><td><code>COUNT</code></td><td><code>neutral</code></td><td>12 h</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div>
+      <b>TDash Protheus</b> · desenvolvido por Daniel Pitthan Silveira · Az Sistemas<br>
+      Dúvidas e sugestões: <a href="mailto:administrativo@azsistemas.tech">administrativo@azsistemas.tech</a>
+    </div>
+    <div>TOTVS e Protheus são marcas da TOTVS S.A.<br>O TDash não é um produto oficial da TOTVS.</div>
+  </div>
+</footer>
+</body>
+</html>

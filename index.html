@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TDash Protheus — APIs TLPP do app TDash</title>
+<meta name="description" content="Programas TLPP/AdvPL abertos que publicam os indicadores do TOTVS Protheus para o app TDash. Baixe, compile no seu RPO e customize as regras.">
+<meta property="og:title" content="TDash Protheus — APIs TLPP do app TDash">
+<meta property="og:description" content="Dashboards do Protheus no celular. Os programas TLPP são abertos: baixe, compile e customize.">
+<meta property="og:image" content="https://danielpitthan.github.io/TDash-Protheus/assets/img/dash-light.webp">
+<meta name="theme-color" content="#0f739c">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/site.css">
+<script src="assets/site.js"></script>
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="index.html">
+      <span class="mark"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="11" width="4" height="10" rx="1"/><rect x="10" y="5" width="4" height="16" rx="1"/><rect x="17" y="8" width="4" height="13" rx="1"/></svg></span>
+      TDASH <small>Protheus</small>
+    </a>
+    <button class="icon-btn menu-btn" id="menuBtn" aria-label="Menu" aria-expanded="false" aria-controls="nav"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+    <nav class="nav" id="nav">
+      <a href="index.html" aria-current="page">Início</a>
+      <a href="usuario.html">Manual do usuário</a>
+      <a href="tecnico.html">Manual técnico</a>
+      <a href="indicadores.html">Indicadores</a>
+      <a href="https://github.com/DanielPitthan/TDash-Protheus">GitHub</a>
+    </nav>
+    <button class="icon-btn" id="themeBtn" aria-label="Alternar tema claro/escuro"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button>
+  </div>
+</header>
+
+<main>
+  <section class="hero">
+    <div class="wrap">
+      <div>
+        <span class="eyebrow">Código aberto · TLPP · Protheus 12.1.2410+</span>
+        <h1>Os indicadores do seu Protheus, <em>calculados por você</em>.</h1>
+        <p class="lead">O <b>TDash</b> mostra no celular os números de gestão do TOTVS Protheus: financeiro, vendas, compras,
+          estoque, produção, fiscal, contabilidade e RH. Quem calcula esses números são as <b>APIs TLPP deste projeto</b>,
+          compiladas no RPO da sua empresa. O código é aberto: leia, confira e ajuste cada regra.</p>
+        <div class="btns">
+          <a class="btn btn-primary" href="https://github.com/DanielPitthan/TDash-Protheus/archive/refs/heads/main.zip">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0-5-5m5 5 5-5M4 19h16"/></svg>
+            Baixar os programas (.zip)</a>
+          <a class="btn btn-ghost" href="tecnico.html#instalacao">Como instalar</a>
+          <a class="btn btn-ghost" href="https://play.google.com/store/apps/details?id=br.com.tdash.app">App na Google Play</a>
+        </div>
+      </div>
+      <div class="hero-phones" aria-hidden="true">
+        <div class="phone"><img data-shot="home" alt="" width="540" height="1080"></div>
+        <div class="phone"><img data-shot="dash" alt="" width="540" height="1080"></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <div class="section-head">
+        <h2>Como o TDash funciona</h2>
+        <p>O app não guarda regra de negócio. Ele pede os números ao Protheus da sua empresa, pelo REST do próprio
+          AppServer, e desenha cartões, gráficos e listas.</p>
+      </div>
+      <div class="grid g2" style="align-items:start">
+        <div class="arch" role="img" aria-label="Camadas: app TDash, REST do Protheus, APIs TLPP, banco do Protheus">
+          <div class="layer"><div><b>App TDash</b><small>Android · desenha os indicadores, guarda cache, funciona sem rede com o último dado</small></div><span class="tag priv">Google Play</span></div>
+          <div class="arrow">HTTPS · <code>GET /tdash/v1/{módulo}/…</code> · usuário e senha do Protheus</div>
+          <div class="layer"><div><b>REST do AppServer</b><small>valida usuário, filial (<code>tenantid</code>) e módulo (<code>x-erp-module</code>)</small></div><span class="tag priv">TOTVS</span></div>
+          <div class="arrow">rota anotada com <code>@Get</code></div>
+          <div class="layer open"><div><b>APIs TLPP do TDash</b><small>catálogo de indicadores, regras de negócio e consultas SQL com bind</small></div><span class="tag pub">Este projeto</span></div>
+          <div class="arrow">consulta por filial, sem registros deletados</div>
+          <div class="layer"><div><b>Banco do Protheus</b><small>SE1, SE2, SD2, SF2, SC7, SB2, SC2, SF3, CQ0, SRA…</small></div><span class="tag priv">Sua empresa</span></div>
+        </div>
+        <div>
+          <div class="card" style="margin-bottom:18px">
+            <h3>Seus dados não saem da sua infraestrutura</h3>
+            <p>O celular conversa direto com o REST do seu Protheus. Não há servidor intermediário: usuário, senha e números
+              trafegam só entre o aparelho e o seu AppServer, por HTTPS.</p>
+          </div>
+          <div class="card" style="margin-bottom:18px">
+            <h3>O Protheus decide quem vê o quê</h3>
+            <p>O login é o mesmo usuário do Protheus. Filiais e módulos seguem o cadastro do Configurador: quem não tem o
+              Financeiro liberado não vê o painel do Financeiro.</p>
+          </div>
+          <div class="card">
+            <h3>Regras abertas e auditáveis</h3>
+            <p>Cada indicador é uma consulta TLPP documentada. Se a sua empresa calcula "faturamento" de outro jeito, você muda a
+              regra no fonte e compila: o app mostra o número novo sem atualização.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="alt" id="telas">
+    <div class="wrap">
+      <div class="section-head">
+        <h2>Telas do app</h2>
+        <p>Do login ao detalhe de um indicador. Toque no botão de tema, no topo do site, para ver o modo escuro.</p>
+      </div>
+      <div class="gallery">
+        <figure><div class="phone"><img data-shot="login" alt="Tela de login do TDash" width="540" height="1080" loading="lazy"></div><figcaption><b>Login</b>usuário e senha do Protheus</figcaption></figure>
+        <figure><div class="phone"><img data-shot="branches" alt="Escolha da filial" width="540" height="1080" loading="lazy"></div><figcaption><b>Filial</b>empresas e filiais liberadas</figcaption></figure>
+        <figure><div class="phone"><img data-shot="home" alt="Tela inicial com indicadores fixados" width="540" height="1080" loading="lazy"></div><figcaption><b>Início</b>indicadores fixados com a estrela</figcaption></figure>
+        <figure><div class="phone"><img data-shot="modules" alt="Grade de módulos" width="540" height="1080" loading="lazy"></div><figcaption><b>Módulos</b>só os liberados ao usuário</figcaption></figure>
+        <figure><div class="phone"><img data-shot="dash" alt="Painel do Financeiro" width="540" height="1080" loading="lazy"></div><figcaption><b>Painel do módulo</b>período, abas, cartões e gráficos</figcaption></figure>
+        <figure><div class="phone"><img data-shot="detail" alt="Lista de detalhe de um indicador" width="540" height="1080" loading="lazy"></div><figcaption><b>Detalhe</b>a lista por trás do número</figcaption></figure>
+        <figure><div class="phone"><img data-shot="filter" alt="Filtro de período" width="540" height="1080" loading="lazy"></div><figcaption><b>Período</b>dia, mês, ano ou intervalo</figcaption></figure>
+        <figure><div class="phone"><img data-shot="settings" alt="Configurações do app" width="540" height="1080" loading="lazy"></div><figcaption><b>Configurações</b>servidor, aparência e parâmetros</figcaption></figure>
+      </div>
+      <p class="note">Telas com dados fictícios.</p>
+    </div>
+  </section>
+
+  <section id="modulos">
+    <div class="wrap">
+      <div class="section-head">
+        <h2>Oito módulos, mais de 120 indicadores</h2>
+        <p>Cada módulo é uma pasta de fontes TLPP com o mesmo padrão: catálogo, API e repositório. Veja todos os indicadores
+          no <a href="indicadores.html">catálogo</a>.</p>
+      </div>
+      <div class="grid g4">
+        <div class="card mod"><span class="code">FIN</span><h3>Financeiro</h3><p>A receber e a pagar, vencidos, aging, inadimplência, PMR/PMP, saldo bancário, fluxo projetado, posição do cliente e do fornecedor.</p></div>
+        <div class="card mod"><span class="code">FAT</span><h3>Faturamento</h3><p>Faturamento bruto e líquido, devoluções, ticket médio, meta, carteira, lucro, impostos e rankings por cliente, produto, vendedor e UF.</p></div>
+        <div class="card mod"><span class="code">COM</span><h3>Compras</h3><p>Volume comprado, pedidos em aberto, atrasados e em aprovação, solicitações, prazos e acompanhamento solicitado × pedido × entregue.</p></div>
+        <div class="card mod"><span class="code">EST</span><h3>Estoque e Custos</h3><p>Valor em estoque, CMV, giro, cobertura, curva ABC, abaixo do ponto de pedido, sem movimento e lotes a vencer.</p></div>
+        <div class="card mod"><span class="code">PCP</span><h3>Produção</h3><p>OPs abertas, atrasadas e encerradas, atingimento do plano, perdas, horas apontadas, produção por hora e balanço de matéria-prima.</p></div>
+        <div class="card mod"><span class="code">FIS</span><h3>Livros Fiscais</h3><p>Saldos de ICMS, IPI, PIS/COFINS, ISS, ST e DIFAL, centralização de débitos e créditos, CFOP, UF, NCM e canceladas.</p></div>
+        <div class="card mod"><span class="code">CTB</span><h3>Contabilidade</h3><p>DRE e Balanço patrimonial pela visão gerencial que a contabilidade da empresa já usa.</p></div>
+        <div class="card mod"><span class="code">GPE</span><h3>Recursos Humanos</h3><p>Quadro, admissões, desligamentos, turnover, folha, horas extras e absenteísmo. Só números agrupados (LGPD).</p></div>
+      </div>
+      <div class="card" style="margin-top:18px;border-left:4px solid var(--positive)">
+        <h3>Painéis personalizados, sem nova versão do app</h3>
+        <p>Tem um processo próprio? Escreva um endpoint TLPP que devolve um JSON com cartões, colunas, barras e tabelas, e o app
+          monta a tela sozinho. Há dois exemplos prontos para copiar em <code>src/custom/</code>.
+          <a href="tecnico.html#painel">Veja como</a>.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="alt" id="comecar">
+    <div class="wrap">
+      <div class="section-head">
+        <h2>Comece em quatro passos</h2>
+        <p>O guia completo está no <a href="tecnico.html#instalacao">manual técnico</a>.</p>
+      </div>
+      <div class="flow">
+        <div class="step"><h4>Baixe os fontes</h4><p>Clone o repositório ou baixe o <a href="https://github.com/DanielPitthan/TDash-Protheus/archive/refs/heads/main.zip">.zip</a>.</p></div>
+        <div class="step"><h4>Compile no RPO</h4><p>Com o TDS-VSCode: primeiro <code>src/core</code>, depois os módulos e <code>src/custom</code>.</p></div>
+        <div class="step"><h4>Teste as rotas</h4><p>Rode o <code>smoke-test.ps1</code> ou chame <code>/tdash/v1/core/branches</code> com <code>curl</code>.</p></div>
+        <div class="step"><h4>Configure o app</h4><p>Instale o TDash, informe o endereço do REST e entre com o usuário do Protheus.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <div class="section-head"><h2>Documentação</h2></div>
+      <div class="grid g3">
+        <a class="card" href="usuario.html" style="text-decoration:none;color:inherit">
+          <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="2" width="12" height="20" rx="2"/><path d="M11 18h2"/></svg></div>
+          <h3>Manual do usuário</h3><p>Para gestores: login, filial, período, comparação, favoritos, detalhes, painéis personalizados e mensagens do app.</p></a>
+        <a class="card" href="tecnico.html" style="text-decoration:none;color:inherit">
+          <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m8 7-5 5 5 5M16 7l5 5-5 5"/></svg></div>
+          <h3>Manual técnico</h3><p>Para a equipe de TI e desenvolvedores AdvPL/TLPP: instalação, arquitetura, contrato JSON, customização, operação e erros.</p></a>
+        <a class="card" href="indicadores.html" style="text-decoration:none;color:inherit">
+          <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg></div>
+          <h3>Catálogo de indicadores</h3><p>Todos os ids, por módulo, com tipo, unidade e validade. Pesquise pelo nome ou pelo id.</p></a>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div>
+      <b>TDash Protheus</b> · desenvolvido por Daniel Pitthan Silveira · Az Sistemas<br>
+      Dúvidas e sugestões: <a href="mailto:administrativo@azsistemas.tech">administrativo@azsistemas.tech</a>
+    </div>
+    <div>TOTVS e Protheus são marcas da TOTVS S.A.<br>O TDash não é um produto oficial da TOTVS.</div>
+  </div>
+</footer>
+</body>
+</html>

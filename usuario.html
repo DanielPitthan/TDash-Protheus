@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Manual do usuário — TDash Protheus</title>
+<meta name="description" content="Como usar o app TDash: login, filial, período, comparação, favoritos, detalhes, painéis personalizados, insights e mensagens.">
+<meta name="theme-color" content="#0f739c">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/site.css">
+<script src="assets/site.js"></script>
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="index.html">
+      <span class="mark"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="11" width="4" height="10" rx="1"/><rect x="10" y="5" width="4" height="16" rx="1"/><rect x="17" y="8" width="4" height="13" rx="1"/></svg></span>
+      TDASH <small>Protheus</small>
+    </a>
+    <button class="icon-btn menu-btn" id="menuBtn" aria-label="Menu" aria-expanded="false" aria-controls="nav"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+    <nav class="nav" id="nav">
+      <a href="index.html">Início</a>
+      <a href="usuario.html" aria-current="page">Manual do usuário</a>
+      <a href="tecnico.html">Manual técnico</a>
+      <a href="indicadores.html">Indicadores</a>
+      <a href="https://github.com/DanielPitthan/TDash-Protheus">GitHub</a>
+    </nav>
+    <button class="icon-btn" id="themeBtn" aria-label="Alternar tema claro/escuro"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button>
+  </div>
+</header>
+
+<div class="wrap doc-head">
+  <h1>Manual do usuário</h1>
+  <p>Para gestores, diretores e analistas que usam o TDash no celular. Não é preciso saber nada de programação: basta ter
+    um usuário do Protheus e o endereço do servidor, que a equipe de TI informa.</p>
+</div>
+
+<div class="wrap doc">
+  <nav class="toc" aria-label="Neste manual">
+    <b>Neste manual</b>
+    <a href="#antes">Antes de começar</a>
+    <a href="#primeiro-acesso">Primeiro acesso</a>
+    <a href="#filial">Filial</a>
+    <a href="#inicio">Início e favoritos</a>
+    <a href="#paineis">Painéis dos módulos</a>
+    <a href="#periodo">Período e comparação</a>
+    <a href="#cartoes">Como ler um cartão</a>
+    <a href="#detalhe">Listas de detalhe</a>
+    <a href="#posicao">Posição do cliente e do fornecedor</a>
+    <a href="#modulos">O que cada módulo mostra</a>
+    <a href="#personalizados">Painéis personalizados</a>
+    <a href="#ia">Insights por IA</a>
+    <a href="#configuracoes">Configurações</a>
+    <a href="#offline">Sem conexão e atualização</a>
+    <a href="#privacidade">Privacidade e segurança</a>
+    <a href="#mensagens">Mensagens do app</a>
+    <a href="#faq">Perguntas frequentes</a>
+  </nav>
+
+  <article>
+    <section id="antes">
+      <h2>Antes de começar</h2>
+      <p>Você precisa de três coisas:</p>
+      <ol class="steps">
+        <li><b>O app TDash</b>, instalado pela <a href="https://play.google.com/store/apps/details?id=br.com.tdash.app">Google Play</a>
+          (Android 7 ou mais novo).</li>
+        <li><b>O endereço do servidor</b> (o REST do Protheus da sua empresa), por exemplo
+          <code>https://suaempresa.protheus.cloudtotvs.com.br:1557/api</code>. Peça à equipe de TI.</li>
+        <li><b>Seu usuário e senha do Protheus</b>, os mesmos que você usa no computador.</li>
+      </ol>
+      <div class="callout">
+        <p>A equipe de TI precisa ter instalado os <a href="tecnico.html#instalacao">programas TLPP do TDash</a> no Protheus da
+          empresa. Sem eles, o app mostra "As APIs do TDash não foram encontradas neste servidor".</p>
+      </div>
+    </section>
+
+    <section id="primeiro-acesso">
+      <h2>Primeiro acesso</h2>
+      <div class="shot-row">
+        <div class="phone"><img data-shot="settings" alt="Configurações com o endereço do servidor" width="540" height="1080" loading="lazy"></div>
+        <div class="phone"><img data-shot="login" alt="Tela de login" width="540" height="1080" loading="lazy"></div>
+      </div>
+      <ol class="steps">
+        <li>Abra o app e toque na <b>engrenagem</b> (Configurações), no topo da tela de login.</li>
+        <li>Em <b>Servidor</b>, informe o endereço do REST e toque em <b>Testar</b>. Com o servidor certo, aparece uma confirmação.
+          Toque em <b>Salvar</b>.</li>
+        <li>Volte ao login, informe usuário e senha do Protheus e toque em <b>Entrar</b>. Marque <b>Lembrar usuário</b> para não
+          digitar o usuário da próxima vez. A senha nunca fica gravada.</li>
+      </ol>
+      <p>O endereço precisa começar com <code>https://</code>. O app recusa conexões sem criptografia.</p>
+    </section>
+
+    <section id="filial">
+      <h2>Filial</h2>
+      <div class="shot-row"><div class="phone"><img data-shot="branches" alt="Escolha da filial" width="540" height="1080" loading="lazy"></div></div>
+      <p>Se o seu usuário tem acesso a mais de uma empresa ou filial, o app pede para escolher uma depois do login. Use a busca
+        para achar pelo nome ou pelo código.</p>
+      <ul>
+        <li>Todos os números são <b>da filial escolhida</b>. Para ver outra filial, toque no ícone do prédio, no topo do Início.</li>
+        <li>Só aparecem as filiais liberadas para o seu usuário no Protheus.</li>
+      </ul>
+    </section>
+
+    <section id="inicio">
+      <h2>Início e favoritos</h2>
+      <div class="shot-row"><div class="phone"><img data-shot="home" alt="Início com indicadores fixados" width="540" height="1080" loading="lazy"></div></div>
+      <p>O Início reúne os indicadores que você mais acompanha, sempre no <b>mês atual</b>.</p>
+      <ul>
+        <li>Para fixar um indicador, toque na <b>estrela</b> do cartão dentro de qualquer painel. Para tirar, toque de novo.</li>
+        <li>Cabem até <b>12 favoritos</b>. Eles ficam guardados por servidor e empresa.</li>
+        <li>Tocar num favorito abre o painel do módulo dele.</li>
+      </ul>
+      <p>A barra inferior leva ao <b>Início</b>, aos <b>Módulos</b>, aos <b>Insights</b> salvos e às <b>Configurações</b>.</p>
+    </section>
+
+    <section id="paineis">
+      <h2>Painéis dos módulos</h2>
+      <div class="shot-row">
+        <div class="phone"><img data-shot="modules" alt="Grade de módulos" width="540" height="1080" loading="lazy"></div>
+        <div class="phone"><img data-shot="dash" alt="Painel do Financeiro" width="540" height="1080" loading="lazy"></div>
+      </div>
+      <p>Em <b>Módulos</b> aparecem só os módulos liberados ao seu usuário no Protheus. Cada painel tem:</p>
+      <ul>
+        <li><b>Barra de período</b> no topo (Dia, Mês, Ano ou Período), com setas para voltar e avançar.</li>
+        <li><b>Abas</b> que separam os assuntos (no Financeiro: Receber, Pagar e Caixa).</li>
+        <li><b>Cartões</b> com o número principal e a variação, <b>gráficos</b> de evolução e <b>barras</b> de composição e ranking.</li>
+        <li>O botão <b>?</b>, com a ajuda do painel: o que cada número significa e de onde vem.</li>
+        <li>O botão de <b>atualizar</b>, que busca os números no Protheus na hora.</li>
+      </ul>
+    </section>
+
+    <section id="periodo">
+      <h2>Período e comparação</h2>
+      <div class="shot-row"><div class="phone"><img data-shot="filter" alt="Escolha do período" width="540" height="1080" loading="lazy"></div></div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Escolha</th><th>Considera</th></tr></thead>
+        <tbody>
+          <tr><td>Dia</td><td>Só o dia escolhido</td></tr>
+          <tr><td>Mês</td><td>Do dia 1º ao último dia do mês (padrão: mês atual)</td></tr>
+          <tr><td>Ano</td><td>De 1º de janeiro a 31 de dezembro</td></tr>
+          <tr><td>Período</td><td>As datas que você escolher, até 24 meses</td></tr>
+        </tbody>
+      </table></div>
+      <ul>
+        <li><b>Saldos e posições são sempre de hoje.</b> A receber em aberto, saldo bancário, valor em estoque e OPs abertas não
+          mudam com o período: mostram a situação atual.</li>
+        <li><b>Indicadores de período</b> (faturamento, compras, produção, folha…) mostram a variação contra o
+          <b>período anterior</b> de mesma duração. Para outubro inteiro, o anterior é de 31/08 a 30/09.</li>
+        <li>Contabilidade e folha do RH trabalham por <b>mês fechado</b>, porque os saldos são mensais.</li>
+      </ul>
+    </section>
+
+    <section id="cartoes">
+      <h2>Como ler um cartão</h2>
+      <p>Cada cartão mostra o título, o valor e, quando há comparação, a seta com a variação.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Cor</th><th>Significa</th></tr></thead>
+        <tbody>
+          <tr><td><b style="color:var(--positive)">Verde</b></td><td>O número melhorou. Em "vencido", cair é bom; em "faturamento", subir é bom.</td></tr>
+          <tr><td><b style="color:var(--negative)">Vermelho</b></td><td>O número piorou.</td></tr>
+          <tr><td><b style="color:var(--muted)">Cinza</b></td><td>Indicador neutro: subir ou cair não é bom nem ruim por si só.</td></tr>
+        </tbody>
+      </table></div>
+      <ul>
+        <li>Valores grandes aparecem resumidos (<code>R$ 1,28 mi</code>, <code>R$ 820 mil</code>). No detalhe, aparecem completos.</li>
+        <li>Um cartão com <b>—</b> e "Protegido pela LGPD" é um número do RH com poucas pessoas no grupo, que poderia
+          identificar alguém.</li>
+        <li>Sem seta: não há base de comparação (por exemplo, o período anterior foi zero).</li>
+      </ul>
+    </section>
+
+    <section id="detalhe">
+      <h2>Listas de detalhe</h2>
+      <div class="shot-row"><div class="phone"><img data-shot="detail" alt="Lista de detalhe" width="540" height="1080" loading="lazy"></div></div>
+      <p>Toque num cartão ou no botão <b>Detalhes</b> para ver a lista por trás do número: títulos vencidos, pedidos atrasados,
+        OPs atrasadas, lotes a vencer, notas canceladas e outros. A lista carrega 20 itens por vez; role até o fim para ver
+        mais.</p>
+    </section>
+
+    <section id="posicao">
+      <h2>Posição do cliente e do fornecedor</h2>
+      <p>No Financeiro, procure um cliente ou fornecedor pelo código ou pelo nome e veja a posição dele:</p>
+      <ul>
+        <li>em aberto, vencido e a vencer, com as faixas de atraso;</li>
+        <li>limite de crédito e crédito disponível (clientes);</li>
+        <li>recebido ou pago no período;</li>
+        <li>títulos em aberto e o histórico de cada loja.</li>
+      </ul>
+      <p>As barras de maiores devedores e maiores pagamentos também abrem a posição de quem você tocar.</p>
+    </section>
+
+    <section id="modulos">
+      <h2>O que cada módulo mostra</h2>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Módulo</th><th>Abas</th><th>Destaques</th></tr></thead>
+        <tbody>
+          <tr><td><b>Financeiro</b></td><td>Receber · Pagar · Caixa</td><td>Em aberto, vencido, a vencer em 30 dias, inadimplência, prazos médios de recebimento e pagamento, vencidos por atraso, maiores devedores e pagamentos, saldo bancário por conta, fluxo de caixa projetado, entradas e saídas realizadas</td></tr>
+          <tr><td><b>Faturamento</b></td><td>Vendas · Resultado · Carteira · Rankings</td><td>Faturamento bruto e líquido, notas emitidas, ticket médio, devoluções, meta × realizado, lucro bruto e líquido, impostos, carteira de pedidos, maiores clientes, produtos, vendedores e UFs</td></tr>
+          <tr><td><b>Compras</b></td><td>Compras · Pedidos · Solicitações · Acompanhamento</td><td>Valor comprado, maiores fornecedores, evolução de preço, pedidos em aberto, atrasados e aguardando aprovação, solicitações pendentes, prazos e o caminho solicitado → pedido → entregue</td></tr>
+          <tr><td><b>Estoque e Custos</b></td><td>Valor · Reposição · Validade</td><td>Valor em estoque, CMV, giro, cobertura, curva ABC, abaixo do ponto de pedido, itens sem movimento, lotes vencidos ou a vencer</td></tr>
+          <tr><td><b>Produção</b></td><td>Visão geral · OPs · Apontamentos · Matéria-prima</td><td>OPs abertas, atrasadas e encerradas, atingimento do plano, produção, perdas, horas apontadas, produção por hora, matéria-prima empenhada, consumida, perdida e devolvida</td></tr>
+          <tr><td><b>Livros Fiscais</b></td><td>Visão geral · Centralização · Apuração · CFOP · Canceladas</td><td>Saldos de ICMS, IPI, PIS/COFINS, ISS, ICMS ST e DIFAL, débitos × créditos, valor por CFOP, entradas e saídas por UF, NCM, notas canceladas</td></tr>
+          <tr><td><b>Contabilidade</b></td><td>DRE · Balanço</td><td>Demonstrações pela visão gerencial escolhida em Configurações, resumidas ou detalhadas</td></tr>
+          <tr><td><b>Recursos Humanos</b></td><td>Quadro · Folha · Afastamentos</td><td>Funcionários ativos, admissões, desligamentos, turnover, perfil do quadro, folha por centro de custo, horas extras, absenteísmo</td></tr>
+        </tbody>
+      </table></div>
+      <p>A lista completa está no <a href="indicadores.html">catálogo de indicadores</a>.</p>
+    </section>
+
+    <section id="personalizados">
+      <h2>Painéis personalizados</h2>
+      <p>A sua empresa pode publicar painéis próprios no Protheus (por exemplo, um processo de manutenção ou de logística). Para
+        ver um deles no app:</p>
+      <ol class="steps">
+        <li>Peça à equipe de TI o <b>caminho</b> do painel, por exemplo <code>/tdash/v1/custom/manutencao</code>, e o
+          <b>módulo</b> dele.</li>
+        <li>Em <b>Módulos › Painéis personalizados</b>, toque em <b>Adicionar painel</b>.</li>
+        <li>Informe nome, caminho e módulo. Ligue <b>Usa período</b> se o painel tiver datas.</li>
+        <li>Toque em <b>Testar</b>: o app mostra quantos blocos leu, ou o erro. Depois, <b>Salvar</b>.</li>
+      </ol>
+      <p>O painel fica cadastrado só no seu aparelho. Cada pessoa adiciona os painéis que quer ver.</p>
+    </section>
+
+    <section id="ia">
+      <h2>Insights por IA</h2>
+      <p>Um modelo de inteligência artificial que roda <b>no próprio celular</b> analisa o painel que está na tela e devolve
+        3 insights e até 2 gráficos. Nenhum dado sai do aparelho.</p>
+      <ul>
+        <li><b>Ativar:</b> em <b>Configurações › Insights por IA › Configurar</b>. O app avalia o aparelho (processador ARM de
+          64 bits, cerca de 6 GB de memória e 2,5 GB livres) e baixa o modelo, de cerca de 1,7 GB. Prefira o Wi-Fi.</li>
+        <li><b>Usar:</b> toque na <b>lâmpada</b> no topo de um painel. A análise continua se você sair da tela; uma notificação
+          avisa quando terminar.</li>
+        <li><b>Salvar e compartilhar:</b> os insights podem ser guardados em <b>Insights</b> e enviados como texto e imagens.</li>
+      </ul>
+      <div class="callout warn"><p>Insights gerados por IA podem conter erros. Confira com os números do painel antes de decidir.</p></div>
+    </section>
+
+    <section id="configuracoes">
+      <h2>Configurações</h2>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Opção</th><th>Para quê</th></tr></thead>
+        <tbody>
+          <tr><td>Servidor</td><td>Endereço do REST do Protheus. Trocar o servidor encerra a sessão e apaga os dados guardados, porque são de outra empresa.</td></tr>
+          <tr><td>Aparência</td><td>Tema claro, escuro ou o do sistema.</td></tr>
+          <tr><td>Filial</td><td>Troca a empresa e a filial.</td></tr>
+          <tr><td>Visão da DRE e do Balanço</td><td>Escolhe a visão gerencial que a Contabilidade usa. Combine com a sua contabilidade qual é a certa.</td></tr>
+          <tr><td>Verbas de hora extra</td><td>Escolhe quais verbas da folha são hora extra, para o painel do RH.</td></tr>
+          <tr><td>Insights por IA</td><td>Ativa, desativa e remove o modelo de IA; abre os insights salvos.</td></tr>
+          <tr><td>Dados no aparelho</td><td>Apaga os números guardados (cache).</td></tr>
+          <tr><td>Sobre</td><td>Versão do app, contato, política de privacidade e o endereço dos programas TLPP.</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <section id="offline">
+      <h2>Sem conexão e atualização</h2>
+      <ul>
+        <li>Cada número fica guardado no aparelho por um tempo: <b>5 minutos</b> para os operacionais (saldo bancário, vencidos),
+          <b>30 minutos</b> para os do mês e <b>12 horas</b> para contabilidade, fiscal e RH.</li>
+        <li>Se o Protheus não responder, o app mostra o último dado guardado com o aviso
+          "Sem conexão com o Protheus. Mostrando dados de dd/MM HH:mm".</li>
+        <li>O botão de <b>atualizar</b> ignora esse tempo e busca tudo de novo.</li>
+      </ul>
+    </section>
+
+    <section id="privacidade">
+      <h2>Privacidade e segurança</h2>
+      <ul>
+        <li>O app conversa <b>só com o servidor da sua empresa</b>, por HTTPS. Não existe servidor do TDash no meio.</li>
+        <li>A senha fica só na memória enquanto o app está aberto. Ela não é gravada.</li>
+        <li>Os números guardados são apagados ao sair, em <b>Dados no aparelho</b> ou ao desinstalar, e não vão para o backup
+          do Google.</li>
+        <li>O Protheus decide o que cada usuário vê: filiais, módulos e acessos seguem o cadastro do Configurador.</li>
+      </ul>
+    </section>
+
+    <section id="mensagens">
+      <h2>Mensagens do app</h2>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Mensagem</th><th>O que fazer</th></tr></thead>
+        <tbody>
+          <tr><td>Configure o endereço do servidor Protheus.</td><td>Informe o endereço em Configurações › Servidor.</td></tr>
+          <tr><td>O endereço precisa começar com https://</td><td>Peça à TI o endereço HTTPS do REST.</td></tr>
+          <tr><td>Não foi possível conectar a {servidor}.</td><td>Confira a internet do celular. Se persistir, avise a TI (porta, VPN ou certificado).</td></tr>
+          <tr><td>O servidor demorou para responder.</td><td>Tente um período menor. Se persistir, avise a TI.</td></tr>
+          <tr><td>Usuário ou senha inválidos.</td><td>Confira os dados. Muitas tentativas podem bloquear o usuário no Protheus.</td></tr>
+          <tr><td>As APIs do TDash não foram encontradas neste servidor.</td><td>Os programas TLPP não estão instalados, ou o endereço está errado. Avise a TI.</td></tr>
+          <tr><td>Resposta inválida do servidor.</td><td>O Protheus está com uma versão dos programas diferente da do app. Avise a TI.</td></tr>
+          <tr><td>Seu usuário não tem acesso a nenhum módulo do TDash.</td><td>Peça à TI para liberar os módulos no seu cadastro do Protheus e entre de novo.</td></tr>
+          <tr><td>Escolha em Configurações a visão gerencial…</td><td>Escolha a visão da DRE ou do Balanço em Configurações.</td></tr>
+          <tr><td>Configure as verbas de hora extra.</td><td>Escolha as verbas em Configurações › Verbas de hora extra.</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <section id="faq">
+      <h2>Perguntas frequentes</h2>
+      <h4>O número do TDash está diferente do relatório do Protheus.</h4>
+      <p>Confira se é a <b>mesma filial</b> e o <b>mesmo período</b>, e se o dado não é de antes da última atualização (toque
+        em atualizar). Se continuar diferente, avise a TI: o <a href="tecnico.html#conferencia">manual técnico</a> diz com qual
+        relatório comparar cada indicador.</p>
+      <h4>Um módulo não aparece para mim.</h4>
+      <p>O módulo não está liberado no seu cadastro do Protheus. Depois que a TI liberar, saia do app e entre de novo.</p>
+      <h4>Posso ver mais de uma filial ao mesmo tempo?</h4>
+      <p>Não. O TDash mostra uma filial por vez. Troque pelo ícone do prédio no Início.</p>
+      <h4>O app funciona sem internet?</h4>
+      <p>Mostra o último dado guardado, com a hora em que foi buscado. Para números novos, é preciso conexão com o Protheus.</p>
+    </section>
+  </article>
+</div>
+
+<footer>
+  <div class="wrap">
+    <div>
+      <b>TDash Protheus</b> · desenvolvido por Daniel Pitthan Silveira · Az Sistemas<br>
+      Dúvidas e sugestões: <a href="mailto:administrativo@azsistemas.tech">administrativo@azsistemas.tech</a>
+    </div>
+    <div>TOTVS e Protheus são marcas da TOTVS S.A.<br>O TDash não é um produto oficial da TOTVS.</div>
+  </div>
+</footer>
+</body>
+</html>
